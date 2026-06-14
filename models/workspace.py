@@ -1,0 +1,1 @@
+﻿from engine.attention import WorkspaceItem as WorkspaceSlot
