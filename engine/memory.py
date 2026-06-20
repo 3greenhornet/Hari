@@ -6,6 +6,7 @@ from datetime import datetime
 import numpy as np
 from google import genai
 from models.memory_event import MemoryEvent
+import json 
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -32,6 +33,7 @@ async def store_memory(event: MemoryEvent) -> None:
         return
     # Compute embedding from content (not from event.embedding which may be None)
     embedding = await embed(event.content)
+    embedding_str = json.dumps(embedding)      # Convert list → '[0.1, 0.2, ...]'
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO memories (id, session_id, turn_number, role, content, event_type,
@@ -41,7 +43,8 @@ async def store_memory(event: MemoryEvent) -> None:
         """, event.id, event.session_id, event.turn_number,
             event.role, event.content, event.event_type,
             event.thematic_tags, event.significance,
-            event.meaning_summary, embedding, event.created_at,
+            event.meaning_summary, embedding_str,   # <--- pass the string
+            event.created_at,
             event.usage_count, event.last_retrieved_turn, event.explanatory_power)
 
 async def retrieve_similar(
@@ -57,6 +60,7 @@ async def retrieve_similar(
     if pool is None:
         return []
     query_emb = await embed(query)
+    query_emb_str = json.dumps(query_emb)   # list → string for pgvector
     max_turn = await pool.fetchval(
         "SELECT COALESCE(MAX(turn_number),0) FROM memories WHERE session_id=$1", session_id
     ) or 1
@@ -70,7 +74,7 @@ async def retrieve_similar(
               AND 1 - (embedding <=> $1::vector) > $3
             ORDER BY similarity DESC
             LIMIT $4
-        """, query_emb, session_id, threshold, limit*2)
+            """, query_emb_str, session_id, threshold, limit*2)
     scored = []
     for r in rows:
         similarity = r["similarity"]
@@ -85,11 +89,20 @@ async def retrieve_similar(
     top = scored[:limit]
     results = []
     for _, r in top:
+        # If embedding is present in the row, parse it safely
+        emb_value = r.get("embedding")
+        if isinstance(emb_value, str):
+            try:
+                emb_value = json.loads(emb_value)
+            except (json.JSONDecodeError, TypeError):
+                emb_value = None
+
         results.append(MemoryEvent(
             id=r["id"], session_id=r["session_id"], turn_number=r["turn_number"],
             role=r["role"], content=r["content"], event_type=r["event_type"],
             thematic_tags=r["thematic_tags"], significance=r["significance"],
-            meaning_summary=r["meaning_summary"], created_at=r["created_at"]
+            meaning_summary=r["meaning_summary"], created_at=r["created_at"],
+            embedding=emb_value   # will be None if not present
         ))
     return results
 
@@ -110,6 +123,8 @@ async def retrieve_candidates(
     if pool is None:
         return []
     query_embedding = await embed(query)
+    query_embedding_str = json.dumps(query_embedding)   # list → '[0.1,0.2]'
+
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, session_id, turn_number, role, content, event_type,
@@ -121,9 +136,17 @@ async def retrieve_candidates(
               AND 1 - (embedding <=> $1::vector) > $3
             ORDER BY similarity DESC
             LIMIT $4
-        """, query_embedding, session_id, similarity_threshold, limit)
+            """, query_embedding_str, session_id, similarity_threshold, limit)
     memories = []
     for row in rows:
+        # Convert embedding from JSON string back to list (stored as string for asyncpg)
+        embedding_value = row["embedding"]
+        if isinstance(embedding_value, str):
+            try:
+                embedding_value = json.loads(embedding_value)
+            except (json.JSONDecodeError, TypeError):
+                embedding_value = None  # fallback if parsing fails
+
         mem = MemoryEvent(
             id=row["id"],
             session_id=row["session_id"],
@@ -134,7 +157,7 @@ async def retrieve_candidates(
             thematic_tags=row["thematic_tags"],
             significance=row["significance"],
             meaning_summary=row["meaning_summary"],
-            embedding=row["embedding"],  # stored embedding
+            embedding=embedding_value,  # now a list or None
             created_at=row["created_at"],
             usage_count=row.get("usage_count", 0),
             last_retrieved_turn=row.get("last_retrieved_turn", 0),

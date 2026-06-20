@@ -14,7 +14,7 @@ from psyche.cascades import (
     apply_completion_cascade,
     apply_session_horizon,
 )
-from engine.generate import generate_lightweight_response as generate_hari_response
+from engine.generate import TurnPipeline   # <-- CHANGED: use the full pipeline
 from engine.curiosity_graph import get_graph_manager
 from db.connection import init_db, close_db
 from engine.consolidation_worker import get_manager as get_consolidation_manager
@@ -26,10 +26,9 @@ load_dotenv()
 _ctx_state: ContextVar[HariState] = ContextVar("hari_state")
 
 async def main():
-    print("🧠 Hari Core – Phase 1 (Lightweight Mode)")
+    print("🧠 Hari Core – Phase 1 (Full Pipeline Mode)")
     print("Type 'exit' to quit.\n")
 
-    # Initialize database and session
     await init_db()
     session_id = str(uuid.uuid4())[:8]
     init_session_log(session_id)
@@ -45,33 +44,37 @@ async def main():
     _last_promotion_turn = 0
     PROMOTION_INTERVAL_TURNS = 50
 
-    use_memory = os.getenv("USE_MEMORY", "False").lower() == "true"
+    # Feature flags – read from .env
+    # NOTE: USE_WORKSPACE=False currently because attention.py has a signature bug.
+    # After fixing engine/attention.py, set USE_WORKSPACE=True in .env.
+    use_memory = os.getenv("USE_MEMORY", "True").lower() == "true"
     use_workspace = os.getenv("USE_WORKSPACE", "False").lower() == "true"
+    use_monologue = os.getenv("USE_MONOLOGUE", "True").lower() == "true"
     print(f"Memory enabled: {use_memory}")
-    print(f"Workspace enabled: {use_workspace}")
+    print(f"Workspace enabled: {use_workspace} (will be True after attention.py fix)")
+    print(f"Monologue enabled: {use_monologue}")
 
-    # Initialize and start the Graph Manager sync worker
+    # Graph manager sync worker
     graph = await get_graph_manager()
     try:
         await graph.start_sync_worker(interval=60)
         print("📡 Graph sync worker started (60s interval).")
     except Exception as e:
         print(f"⚠️ Failed to start graph sync worker: {e}")
-        # Proceed anyway, but log the issue
-# Initialize and start Phase 6 Background Memory Consolidation
 
+    # Memory consolidation worker
     consolidation_manager = get_consolidation_manager()
     try:
         await consolidation_manager.start(session_id)
-        print("扫 Background memory consolidation worker active.")
+        print("🗄️ Background memory consolidation worker active.")
     except Exception as e:
         print(f"⚠️ Failed to start memory consolidation worker: {e}")
 
-    # Background promotion task (calls archive_inactive_structures periodically)
+    # Periodic promotion archival (stub, but harmless)
     async def run_periodic_promotion():
         nonlocal _last_promotion_turn
         while True:
-            await asyncio.sleep(1)  # Check every second
+            await asyncio.sleep(1)
             if turn - _last_promotion_turn >= PROMOTION_INTERVAL_TURNS and turn > 0:
                 from engine.promotions import archive_inactive_structures
                 archived = await archive_inactive_structures(turn)
@@ -80,8 +83,7 @@ async def main():
                 _last_promotion_turn = turn
 
     _promotion_task = asyncio.create_task(run_periodic_promotion())
-    
-            
+
     try:
         while True:
             try:
@@ -93,56 +95,58 @@ async def main():
                 break
 
             turn += 1
-            # Generate a unique trace ID for this turn
             trace_id = str(uuid.uuid4())
 
-            # Simple deterministic drive changes (demo)
-            if len(user) < 10:
-                state.update({"curiosity": -0.05, "rest": 0.03})
-            else:
-                state.update({"curiosity": 0.05, "care": 0.03})
+            # -----------------------------------------------------------------
+            # REMOVED: hardcoded drive updates (len(user) < 10 ...)
+            # State changes now come only from:
+            #   - Stage1 monologue output
+            #   - Deterministic cascades (below)
+            #   - Natural drift (inside TurnPipeline)
+            # -----------------------------------------------------------------
 
-            # Apply cascades
+            # Apply deterministic cascades (these are fine – they model fatigue, sovereignty, etc.)
             apply_fatigue_cascade(state)
             apply_sovereignty_cascade(state)
             apply_coherence_cascade(state, contradiction_occurred=False)
             apply_completion_cascade(state, num_unresolved_questions=0)
             apply_session_horizon(state, turn)
 
-            # Generate response – pass trace_id
-            result = await generate_hari_response(
-                user, state, grace, turn, session_id, use_memory, use_workspace,
-                trace_id=trace_id
-            )
-            dialogue = result["dialogue"]
-            print(f"Hari> {dialogue}\n")
-            print(f"[DEBUG turn {turn}] curiosity={state.curiosity:.2f}, completion={state.completion:.2f}, rest={state.rest:.2f}")
+            # Use the full TurnPipeline (bypasses the old lightweight generator)
+            pipeline = TurnPipeline(session_id, state, grace)
+            try:
+                result = await pipeline.execute(
+                    user_input=user,
+                    turn_count=turn,
+                    trace_id=trace_id
+                )
+                dialogue = result["dialogue"]
+                print(f"Hari> {dialogue}\n")
+                # Simple debug: show current drives (useful for tuning)
+                print(f"[DEBUG turn {turn}] curiosity={state.curiosity:.2f}, completion={state.completion:.2f}, "
+                      f"care={state.care:.2f}, rest={state.rest:.2f}")
+            except Exception as e:
+                print(f"⚠️ Error on turn {turn}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue   # go to next turn
 
     finally:
         print("\n🛑 Initiating graceful shutdown sequence...")
-
-        # 1. Stop the memory consolidation worker first
-        print("🗄️ Stopping memory consolidation worker...")
         try:
             await consolidation_manager.stop()
         except Exception as e:
-            print(f"Error winding down consolidation manager: {e}")
-
-        # 2. Always stop the graph worker before closing DB
-        print("🛑 Stopping graph sync worker...")
+            print(f"Error stopping consolidation manager: {e}")
         try:
             await graph.stop_sync_worker()
         except Exception as e:
             print(f"Error stopping graph worker: {e}")
-
-        # 3. Cancel the promotion background task
         if _promotion_task:
             _promotion_task.cancel()
             try:
                 await _promotion_task
             except asyncio.CancelledError:
                 pass
-
         await close_db()
         log_event({"event": "session_end", "turn_count": turn})
         print("Goodbye.")

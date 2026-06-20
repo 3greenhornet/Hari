@@ -157,30 +157,37 @@ async def _compute_pressure_field(
 async def compute_total_salience(
     pressures: Dict[str, float],
     state: HariState,
-    item_payload: Dict[str, Any]   # new parameter
 ) -> float:
     """
-    Weight the pressure vector by Hari's current state drives,
-    then apply item‑specific fatigue and explanatory power.
+    Weight the pressure vector by Hari's current state drives.
+    Returns a salience score between 0 and 1.
     """
     weights = {
-        "relevance": 1.0,
-        "novelty": state.curiosity,
+        "relevance": 1.0,           # base weight – always matters
+        "novelty": state.curiosity, # curious minds care about novelty
         "curiosity": state.curiosity,
         "completion": state.completion,
     }
     total = 0.0
+    total_weight = 0.0
     for name, pressure in pressures.items():
-        w = weights.get(name, 1.0)
+        w = weights.get(name, 0.0)
         total += pressure * w
+        total_weight += w
+    # Normalise by total weight (avoid division by zero)
+    if total_weight > 0:
+        salience = total / total_weight
+    else:
+        salience = 0.5
+    return min(1.0, max(0.0, salience))
 
-    # Add prediction‑error modulated by explanatory power
-    # Note: prediction_error is already passed; we need it here.
-    # We'll pull it from a closure – but easier: pass prediction_error as argument.
-    # For now, assume it's available via state? No. Let's change signature.
-    # Actually we should modify call site too. Let's do it cleanly.
 
-    # I'll rewrite the function to accept prediction_error as well.
+    # Legacy alias for engine/__init__.py (avoids refactoring downstream)
+async def compute_salience(pressures: Dict[str, float], state: HariState) -> float:
+    """Deprecated: use compute_total_salience directly."""
+    return await compute_total_salience(pressures, state)
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -365,6 +372,9 @@ async def load_workspace(
     if state.coherence > 0.7:
         temperature *= 0.8
     probabilities = _softmax(scores, temperature)
+    probabilities = np.array(probabilities)
+    probabilities = probabilities / np.sum(probabilities)   # force exact sum = 1.0hari
+
 
     # 5. Select top items (stochastic sampling according to probabilities)
     num_selected = min(workspace_size, len(enriched_candidates))

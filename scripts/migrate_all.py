@@ -101,7 +101,30 @@ async def run_migration():
                 created_at TIMESTAMP NOT NULL
             );
         """)
-        
+        # ===== 8. Create curiosity_nodes and curiosity_edges =====
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS curiosity_nodes (
+                id TEXT PRIMARY KEY,
+                core_question TEXT NOT NULL,
+                importance FLOAT DEFAULT 0.5,
+                exploration_progress FLOAT DEFAULT 0.0,
+                last_referenced TIMESTAMP DEFAULT NOW(),
+                properties JSONB DEFAULT '{}'
+            );
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS curiosity_edges (
+                source_id TEXT REFERENCES curiosity_nodes(id) ON DELETE CASCADE,
+                target_id TEXT REFERENCES curiosity_nodes(id) ON DELETE CASCADE,
+                weight FLOAT DEFAULT 0.0,
+                PRIMARY KEY (source_id, target_id)
+            );
+        """)
+
+        # Optional: Add index on curiosity_nodes for faster queries
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_curiosity_nodes_importance ON curiosity_nodes(importance DESC);")
+                
         # ===== 7. Create missing indexes =====
         await conn.execute("CREATE INDEX IF NOT EXISTS memories_session_idx ON memories(session_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_promoted ON memories(promoted_to_hypothesis, significance);")

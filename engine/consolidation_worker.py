@@ -12,7 +12,7 @@ import os
 from typing import Optional
 
 from engine.memory_consolidation import run_consolidation
-from engine.curiosity_graph import decay_graph_nodes
+from engine.curiosity_graph import get_graph_manager
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,10 @@ class ConsolidationManager:
                         if result.get("archived_memories", 0) > 0:
                             logger.info(f"🗄️ Archived {result['archived_memories']} old memories")
 
-                        await decay_graph_nodes(decay_factor=0.99)
+                        graph_manager = await get_graph_manager()
+                        await graph_manager.decay(decay_factor=0.99)
+
+
                         last_consolidation_turn = turn_counter
                     except Exception as e:
                         logger.error(f"❌ Consolidation cycle failed: {e}")

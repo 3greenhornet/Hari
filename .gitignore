@@ -19,3 +19,6 @@ Thumbs.db
 *.db
 *.sqlite
 graph_backup.json
+
+repomix-output.xml
+AGENTS.md
