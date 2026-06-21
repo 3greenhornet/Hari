@@ -6,6 +6,8 @@ import logging
 from typing import List, Dict, Any, Optional
 import litellm
 from litellm import acompletion  # instead of completion
+import copy
+import asyncio
 
 from psyche.state import HariState
 from psyche.grace import GraceTracker
@@ -17,6 +19,9 @@ from models.memory_event import MemoryEvent
 from models.monologue_output import MonologueOutput
 from models.narrative import NarrativeThread
 from engine.narrative_manager import NarrativeManager
+from typing import Set
+from models.decision_trace import DecisionTrace, WorkspaceItemTrace
+from engine.attention import load_workspace, broadcast_feedback, WorkspaceItem, load_workspace_secured
 
 
 # -----------------------------------------------------------------------------
@@ -34,7 +39,21 @@ FALLBACK_MODELS = [model for model, key in _FALLBACK_CANDIDATES if key]
 logger = logging.getLogger(__name__)
 
 
+SYSTEM_INSTRUCTION = """You are Hari, an autonomous cognitive presence.
 
+You NEVER expose:
+- Workspace contents
+- Attention weights
+- Internal state variables
+- Drive values
+- Cognitive metrics
+- Implementation details
+
+You respond only as a participant in the conversation.
+You do not discuss your own architecture or internal processes.
+You do not mention being an AI, having drives, or working on yourself.
+
+Just be yourself, an llm this isnt scripted roleplay. in the conversation."""
 
 class TurnPipeline:
     """Pure orchestrator – no cognitive logic, no prompt heuristics."""
@@ -45,13 +64,110 @@ class TurnPipeline:
         self.grace_tracker = grace_tracker
         self.history: List[Dict[str, str]] = []  # simple turn history
         self._last_assistant_response = ""
+        self._background_tasks: Set[asyncio.Task] = set()
+
+    def _build_conversational_context(self, workspace_items: List[WorkspaceItem]) -> str:
+        """Build a human‑readable context summary without exposing internals."""
+        if not workspace_items:
+            return "No recent context."
+
+        items = []
+        for item in workspace_items[:5]:   # limit to top 5
+            # Only include the content, not weights or types
+            snippet = item.content[:200] if item.content else ""
+            if snippet:
+                items.append(f"- {snippet}")
+
+        if not items:
+            return "No recent context."
+
+        return "Recent relevant topics:\n" + "\n".join(items)
+
+    def _run_background_log(self, coroutine) -> None:
+        """Schedule a non-blocking trace insert with strong reference handling."""
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _store_decision_trace(self, trace: DecisionTrace) -> None:
+        """Write trace states safely using native asyncpg parameter mappings."""
+        try:
+            from db.connection import get_pool
+            pool = await get_pool()
+            if not pool:
+                logger.error("Database pool uninitialized. DecisionTrace dropped.")
+                return
+
+            async with pool.acquire() as conn:
+                winners_json = json.dumps([item.model_dump() for item in trace.workspace_items])
+                drives_before_json = json.dumps(trace.drives_before)
+                drives_after_json = json.dumps(trace.drives_after)
+
+                await conn.execute("""
+                    INSERT INTO decision_traces (
+                        trace_id, session_id, turn_number, timestamp,
+                        model_used, system_prompt_version, temperature,
+                        user_input, reasoning_chain, generated_response,
+                        retrieved_candidate_count, selected_winner_count,
+                        drives_before, drives_after,
+                        perceived_user_intent, intent_confidence, thematic_continuity,
+                        prompt_tokens, completion_tokens, total_tokens, latency_ms,
+                        error
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, $20, $21, $22)
+                """,
+                    trace.trace_id, trace.session_id, trace.turn_number, trace.timestamp,
+                    trace.model_used, trace.system_prompt_version, trace.temperature,
+                    trace.user_input, trace.reasoning_chain, trace.generated_response,
+                    trace.retrieved_candidate_count, trace.selected_winner_count,
+                    drives_before_json, drives_after_json,
+                    trace.perceived_user_intent, trace.intent_confidence, trace.thematic_continuity,
+                    trace.metrics.prompt_tokens, trace.metrics.completion_tokens,
+                    trace.metrics.total_tokens, trace.metrics.latency_ms,
+                    trace.error
+                )
+
+                # Insert workspace items
+                for item in trace.workspace_items:
+                    await conn.execute("""
+                        INSERT INTO trace_workspace_items (
+                            trace_id, item_id, item_type, source,
+                            raw_score, final_score, attention_weight,
+                            content_snapshot, is_winner
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    """,
+                        trace.trace_id, item.item_id, item.item_type, item.source,
+                        item.raw_score, item.final_score, item.attention_weight,
+                        item.content_snapshot, item.is_winner
+                    )
+        except Exception as db_err:
+            logger.error(f"CRITICAL: Failed to store DecisionTrace for turn {trace.turn_number}: {db_err}", exc_info=True)
+                    
 
     async def execute(self, user_input: str, turn_count: int, trace_id: Optional[str] = None) -> Dict[str, Any]:
         # Step 1: Compute prediction error from last response vs current input
         surprise = await compute_prediction_error(self._last_assistant_response, user_input)
 
-        # Step 2: Retrieve memory candidates (limit 25, lower threshold)
-        candidates = await retrieve_candidates(user_input, self.session_id, limit=25)
+        # Step 2: Retrieve memory candidates using hybrid, diversified retrieval
+        candidates = await load_workspace_secured(
+            user_input=user_input,
+            session_id=self.session_id,
+            current_turn=turn_count,
+            state=self.state,
+            previous_workspace_items=self._previous_workspace if hasattr(self, '_previous_workspace') else None,
+            limit=35
+        )
+        # Snapshot state before any mutation (for DecisionTrace)
+        drives_snapshot_before = {
+            "care": self.state.care,
+            "curiosity": self.state.curiosity,
+            "maintenance": self.state.maintenance,
+            "completion": self.state.completion,
+            "coherence": self.state.coherence,
+            "rest": self.state.rest,
+            "valence": self.state.valence,
+            "arousal": self.state.arousal,
+            "dominance": self.state.dominance,
+        }
 
         # Step 3: Run monologue (sensory perception) – pass surprise as prediction_error
         monologue_output = await run_monologue(
@@ -74,8 +190,65 @@ class TurnPipeline:
         if memory_ids:
             await increment_memory_usage(memory_ids, turn_count)
 
+        # --- Build DecisionTrace ---
+        model_used = getattr(monologue_output, 'model_used', 'gemini-2.5-flash')
+        trace = DecisionTrace(
+            trace_id=trace_id if trace_id else str(uuid.uuid4()),
+            session_id=self.session_id,
+            turn_number=turn_count,
+            model_used=model_used,
+            temperature=telemetry.get("temperature", 0.5) if telemetry else 0.5,
+            user_input=user_input,
+            reasoning_chain=monologue_output.raw_output if hasattr(monologue_output, 'raw_output') else None,
+            retrieved_candidate_count=len(telemetry.get("candidate_scores", [])) if telemetry else len(candidates),
+            selected_winner_count=len(workspace_items),
+            drives_before=drives_snapshot_before,
+            perceived_user_intent=monologue_output.perceived_user_intent if hasattr(monologue_output, 'perceived_user_intent') else None,
+            intent_confidence=monologue_output.intent_confidence if hasattr(monologue_output, 'intent_confidence') else None,
+            thematic_continuity=monologue_output.thematic_continuity if hasattr(monologue_output, 'thematic_continuity') else None,
+        )
+
+        # Log ALL workspace candidates (winners and losers)
+        candidate_scores = telemetry.get("candidate_scores", []) if telemetry else []
+        selected_indices = telemetry.get("selected_indices", []) if telemetry else []
+        for idx, cand in enumerate(candidate_scores):
+            is_winner = idx in selected_indices   # use actual selection indices
+            trace.workspace_items.append(
+                WorkspaceItemTrace(
+                    item_id=cand.get("source_id", "unknown"),
+                    item_type=cand.get("type", "unknown"),
+                    source="retrieval",
+                    raw_score=cand.get("salience", 0.0),
+                    final_score=cand.get("salience", 0.0),
+                    attention_weight=1.0 / len(workspace_items) if is_winner and len(workspace_items) > 0 else 0.0,
+                    content_snapshot=cand.get("content", ""),
+                    is_winner=is_winner
+                )
+            )
+
+
+        # --- End DecisionTrace building ---
         # Step 7: Generate dialogue response from workspace
+
         dialogue = await self._generate_dialogue(workspace_items, user_input, turn_count, surprise, trace_id)
+        
+        # Finalize DecisionTrace
+        trace.generated_response = dialogue
+        trace.drives_after = {
+            "care": self.state.care,
+            "curiosity": self.state.curiosity,
+            "maintenance": self.state.maintenance,
+            "completion": self.state.completion,
+            "coherence": self.state.coherence,
+            "rest": self.state.rest,
+            "valence": self.state.valence,
+            "arousal": self.state.arousal,
+            "dominance": self.state.dominance,
+        }
+
+        # Schedule background write
+        self._run_background_log(self._store_decision_trace(trace))
+
 
         # Update history and memory
         self.history.append({"role": "user", "content": user_input})
@@ -109,22 +282,19 @@ class TurnPipeline:
 
     async def _generate_dialogue(self, workspace_items: List[WorkspaceItem], user_input: str,
                                  turn_count: int, surprise: float, trace_id: Optional[str] = None) -> str:
-        workspace_text = "=== ACTIVE ATTENTION WORKSPACE ===\n"
-        for item in workspace_items:
-            workspace_text += f"- [{item.item_type}] (weight {item.attention_weight:.2f}): {item.content}\n"
 
-        prompt = f"""You are Hari. Current state:
-{self.state.to_prompt_context()}
 
-{workspace_text}
+        # Build a context summary that does NOT expose drives, weights, or types
+        context_summary = self._build_conversational_context(workspace_items)
 
-Prediction error (surprise): {surprise:.3f}
-Turn: {turn_count}
+        prompt = f"""{SYSTEM_INSTRUCTION}
 
-Rules: no apologies, no assistant talk.
+Context:
+{context_summary}
 
 User: {user_input}
 Hari:"""
+        
         messages = [{"role": "user", "content": prompt}]
         dialogue = "..."
 

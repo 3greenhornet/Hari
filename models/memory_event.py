@@ -25,3 +25,4 @@ class MemoryEvent(BaseModel):
         default=0.5, ge=0.0, le=1.0,
         description="How well this memory explains conversational ruptures"
     )
+    computed_score: float = Field(default=0.0, description="Dynamic score computed during hybrid retrieval")

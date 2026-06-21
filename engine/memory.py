@@ -1,12 +1,13 @@
 # hari/engine/memory.py
 import os
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
 import numpy as np
 from google import genai
 from models.memory_event import MemoryEvent
 import json 
+import math
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -185,6 +186,96 @@ async def increment_memory_usage(memory_ids: List[str], current_turn: int) -> No
                 last_retrieved_turn = $2
             WHERE id = ANY($1::text[])
         """, memory_ids, current_turn)
+
+async def retrieve_candidates_hybrid(
+    query: str,
+    session_id: str,
+    current_turn: int,
+    state_drives: Dict[str, float],
+    limit: int = 35,
+    vector_weight: float = 0.5,
+    keyword_weight: float = 0.3,
+    recency_weight: float = 0.2
+) -> List[MemoryEvent]:
+    """
+    Executes a unified vector + BM25 keyword + recency candidate search.
+    Returns up to `limit` candidates with computed scores.
+    """
+    from db.connection import get_pool
+    pool = await get_pool()
+    if pool is None:
+        return []
+
+    query_embedding = await embed(query)
+    query_embedding_str = json.dumps(query_embedding)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, session_id, turn_number, role, content, event_type,
+                   thematic_tags, significance, meaning_summary,
+                   usage_count, last_retrieved_turn, explanatory_power, created_at,
+                   (1 - (embedding <=> $1::vector)) AS vector_similarity,
+                   ts_rank_cd(text_search_vector, plainto_tsquery('english', $2)) AS keyword_score
+            FROM memories
+            WHERE session_id = $3 AND embedding IS NOT NULL
+              AND (
+                1 - (embedding <=> $1::vector) > 0.45
+                OR text_search_vector @@ plainto_tsquery('english', $2)
+              )
+            ORDER BY vector_similarity DESC
+            LIMIT $4
+        """, query_embedding_str, query, session_id, limit)
+
+    candidates: List[MemoryEvent] = []
+
+    for row in rows:
+        mem = MemoryEvent(
+            id=row["id"],
+            session_id=row["session_id"],
+            turn_number=row["turn_number"],
+            role=row["role"],
+            content=row["content"],
+            event_type=row["event_type"],
+            thematic_tags=row["thematic_tags"] or [],
+            significance=row["significance"],
+            meaning_summary=row["meaning_summary"],
+            embedding=None,
+            created_at=row["created_at"],
+            usage_count=row["usage_count"],
+            last_retrieved_turn=row["last_retrieved_turn"],
+            explanatory_power=row["explanatory_power"]
+        )
+
+        v_sim_raw = row["vector_similarity"]
+        if isinstance(v_sim_raw, np.ndarray):
+            v_sim = float(v_sim_raw.item())
+        else:
+            v_sim = float(v_sim_raw or 0.0)
+        v_sim = max(0.0, v_sim)
+        k_score = min(1.0, (row["keyword_score"] or 0.0) / 10.0)
+
+        turn_delta = max(0, current_turn - mem.turn_number)
+        recency_score = math.exp(-0.015 * turn_delta)
+
+        base_score = (
+            (v_sim * vector_weight) +
+            (k_score * keyword_weight) +
+            (recency_score * recency_weight)
+        )
+
+        drive_boost = 0.0
+        if state_drives.get("curiosity", 0.0) > 0.7 and mem.usage_count == 0:
+            drive_boost += 0.15
+        if state_drives.get("completion", 0.0) > 0.7 and mem.event_type in ("open_thread", "tension"):
+            drive_boost += 0.20
+
+        mem.computed_score = base_score + drive_boost
+        candidates.append(mem)
+
+    candidates.sort(key=lambda x: x.computed_score, reverse=True)
+    return candidates
+
+
 
 async def ensure_memories_table():
     """Table already created manually – do nothing."""

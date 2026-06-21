@@ -22,17 +22,19 @@ Attentional inertia: winning items persist across turns with exponential decay.
 import asyncio
 import logging
 import math
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Literal
 from concurrent.futures import ThreadPoolExecutor
 
-import numpy as np
+
+
 
 from engine.memory import embed
 from models.memory_event import MemoryEvent
 from psyche.state import HariState
 from engine.memory import increment_memory_usage
-
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +122,10 @@ async def _compute_pressure_field(
 
     # 1. Relevance Pressure: cosine similarity with user input
     relevance = 0.5   # default neutral
-    if user_embedding is not None and "embedding" in candidate:
+    candidate_embedding = candidate.get("embedding")
+    if user_embedding is not None and candidate_embedding is not None:
         try:
-            candidate_emb = np.array(candidate["embedding"], dtype=np.float32)
+            candidate_emb = np.array(candidate_embedding, dtype=np.float32)
             # Normalise embeddings for cosine similarity
             user_norm = user_embedding / (np.linalg.norm(user_embedding) + 1e-8)
             cand_norm = candidate_emb / (np.linalg.norm(candidate_emb) + 1e-8)
@@ -155,31 +158,56 @@ async def _compute_pressure_field(
 
 
 async def compute_total_salience(
-    pressures: Dict[str, float],
+    pressures: Dict[str, Any],
     state: HariState,
 ) -> float:
     """
-    Weight the pressure vector by Hari's current state drives.
-    Returns a salience score between 0 and 1.
+    Blends cognitive pressures with core state drives.
+    Guarantees a clean, scalar float output between 0.0 and 1.0.
     """
     weights = {
-        "relevance": 1.0,           # base weight – always matters
-        "novelty": state.curiosity, # curious minds care about novelty
-        "curiosity": state.curiosity,
-        "completion": state.completion,
+        "relevance": 1.0,
+        "novelty": float(state.curiosity),
+        "curiosity": float(state.curiosity),
+        "completion": float(state.completion),
     }
-    total = 0.0
+
+    weighted_sum = 0.0
     total_weight = 0.0
-    for name, pressure in pressures.items():
+
+    for name, raw_pressure in pressures.items():
         w = weights.get(name, 0.0)
-        total += pressure * w
+        if w == 0.0:
+            continue
+
+        # Safely convert the pressure to a float scalar
+        try:
+            if isinstance(raw_pressure, np.ndarray):
+                p = float(raw_pressure.item())
+                logger.warning(
+                    f"Extracted scalar {p} from NumPy array in pressure '{name}'. "
+                    "This indicates a data type issue upstream."
+                )
+            else:
+                p = float(raw_pressure)
+        except (TypeError, ValueError) as cast_err:
+            logger.error(
+                f"Failed to convert pressure '{name}' value {raw_pressure} to float: {cast_err}"
+            )
+            continue
+
+        weighted_sum += p * w
         total_weight += w
-    # Normalise by total weight (avoid division by zero)
-    if total_weight > 0:
-        salience = total / total_weight
+
+    if total_weight > 0.0:
+        salience = weighted_sum / total_weight
     else:
         salience = 0.5
-    return min(1.0, max(0.0, salience))
+
+    if isinstance(salience, np.ndarray):
+        salience = float(salience.item())
+
+    return max(0.0, min(1.0, salience))
 
 
     # Legacy alias for engine/__init__.py (avoids refactoring downstream)
@@ -373,7 +401,12 @@ async def load_workspace(
         temperature *= 0.8
     probabilities = _softmax(scores, temperature)
     probabilities = np.array(probabilities)
-    probabilities = probabilities / np.sum(probabilities)   # force exact sum = 1.0hari
+    prob_sum = np.sum(probabilities)
+    if prob_sum <= 0 or np.isnan(prob_sum):
+        # Fallback to uniform distribution if all scores are zero/NaN
+        probabilities = np.ones(len(probabilities))
+        prob_sum = len(probabilities)
+    probabilities = probabilities / prob_sum
 
 
     # 5. Select top items (stochastic sampling according to probabilities)
@@ -437,3 +470,132 @@ async def _run_in_executor(func, *args):
     """Run a CPU‑heavy function in a thread pool to avoid blocking the event loop."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, func, *args)
+
+
+
+def apply_workspace_diversity_penalty(
+    candidates: List[MemoryEvent],
+    target_count: int = 15,
+    similarity_decay_factor: float = 0.4
+) -> List[MemoryEvent]:
+    """
+    Iteratively selects candidates using a diversity penalty filter.
+    Guarantees the workspace contains a balanced mixture of thematic context.
+    """
+    if not candidates:
+        return []
+
+    selected_items: List[MemoryEvent] = []
+    remaining_pool = list(candidates)
+    observed_tags: Dict[str, int] = {}
+
+    while len(selected_items) < target_count and remaining_pool:
+        for item in remaining_pool:
+            penalty = 0.0
+            for tag in item.thematic_tags or []:
+                if tag in observed_tags:
+                    penalty += observed_tags[tag] * similarity_decay_factor
+            item.computed_score -= penalty
+
+        remaining_pool.sort(key=lambda x: x.computed_score, reverse=True)
+        winner = remaining_pool.pop(0)
+        selected_items.append(winner)
+
+        for tag in winner.thematic_tags or []:
+            observed_tags[tag] = observed_tags.get(tag, 0) + 1
+
+    return selected_items
+
+
+async def load_workspace_secured(
+    user_input: str,
+    session_id: str,
+    current_turn: int,
+    state: HariState,
+    previous_workspace_items: Optional[List[WorkspaceItem]] = None,
+    limit: int = 35
+) -> List[MemoryEvent]:
+    """
+    Ensures cognition never collapses to zero by falling back through a structured chain.
+    """
+    from engine.memory import retrieve_candidates_hybrid
+
+    state_drives = {
+        "curiosity": state.curiosity,
+        "completion": state.completion,
+        "coherence": state.coherence,
+        "care": state.care
+    }
+
+    # Layer 1: Primary hybrid retrieval
+    candidates = await retrieve_candidates_hybrid(
+        query=user_input,
+        session_id=session_id,
+        current_turn=current_turn,
+        state_drives=state_drives,
+        limit=limit
+    )
+
+    # Layer 2: Fallback if candidates < 5
+    if len(candidates) < 5:
+        logger.warning(f"Turn {current_turn}: Primary retrieval returned {len(candidates)} candidates. Triggering fallback.")
+        from db.connection import get_pool
+        pool = await get_pool()
+        if pool:
+            async with pool.acquire() as conn:
+                fallback_rows = await conn.fetch("""
+                    SELECT id, session_id, turn_number, role, content, event_type,
+                           thematic_tags, significance, meaning_summary,
+                           usage_count, last_retrieved_turn, explanatory_power, created_at
+                    FROM memories
+                    WHERE session_id = $1
+                    ORDER BY turn_number DESC
+                    LIMIT 15
+                """, session_id)
+
+                for row in fallback_rows:
+                    if not any(c.id == row["id"] for c in candidates):
+                        mem = MemoryEvent(
+                            id=row["id"],
+                            session_id=row["session_id"],
+                            turn_number=row["turn_number"],
+                            role=row["role"],
+                            content=row["content"],
+                            event_type=row["event_type"],
+                            thematic_tags=row["thematic_tags"] or [],
+                            significance=row["significance"],
+                            meaning_summary=row["meaning_summary"],
+                            created_at=row["created_at"],
+                            usage_count=row["usage_count"],
+                            last_retrieved_turn=row["last_retrieved_turn"],
+                            explanatory_power=row["explanatory_power"]
+                        )
+                        mem.computed_score = 0.5
+                        candidates.append(mem)
+
+    # Layer 3: Inertia – inject previous workspace items
+    if len(candidates) < 3 and previous_workspace_items:
+        logger.warning(f"Turn {current_turn}: Injecting previous workspace items for inertia.")
+        for old_item in previous_workspace_items:
+            if not any(c.id == old_item.id for c in candidates):
+                mem = MemoryEvent(
+                    id=old_item.id,
+                    session_id=session_id,
+                    turn_number=current_turn - 1,
+                    role="assistant",
+                    content=old_item.content,
+                    event_type="workspace_inertia",
+                    thematic_tags=[],
+                    significance=0.4,
+                    meaning_summary=old_item.content[:100],
+                    created_at=datetime.now(),
+                    usage_count=0,
+                    last_retrieved_turn=current_turn - 1,
+                    explanatory_power=0.3
+                )
+                mem.computed_score = 0.4
+                candidates.append(mem)
+
+    # Apply diversity penalty
+    diversified = apply_workspace_diversity_penalty(candidates, target_count=15)
+    return diversified
