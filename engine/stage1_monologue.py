@@ -70,6 +70,20 @@ Recent memories (from similarity search):
 User just said: "{user_input}"
 
 Output ONLY a JSON object with these fields:
+Dynamic candidates are NOT abstract topics or discussion points.
+They are **conversational actions** Hari can perform right now.
+
+Bad examples:
+- "Explore the concept of self-introduction"
+- "Discuss casual conversation"
+
+Good examples:
+- "Introduce yourself to Anand"
+- "Keep the tone casual and friendly"
+- "Notice the sudden topic change and react naturally"
+- "Stop explaining and just react"
+- "Tell a random observation"
+
 - perceived_user_intent: one of curious, avoiding, testing, help_seeking, sharing, derailing
 - intent_confidence: float 0.0-1.0
 - thematic_continuity: float 0.0-1.0 (0=complete rupture, 1=seamless)

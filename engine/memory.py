@@ -60,6 +60,10 @@ async def retrieve_similar(
     pool = await get_pool()
     if pool is None:
         return []
+        # Guard: empty or whitespace-only queries cannot be embedded
+    if not query or not query.strip():
+        return []
+    
     query_emb = await embed(query)
     query_emb_str = json.dumps(query_emb)   # list → string for pgvector
     max_turn = await pool.fetchval(
@@ -168,10 +172,6 @@ async def retrieve_candidates(
     return memories
 
 async def increment_memory_usage(memory_ids: List[str], current_turn: int) -> None:
-    """
-    Increment usage_count and update last_retrieved_turn for retrieved memories.
-    Should be called after workspace allocation (once per turn).
-    """
     from db.connection import get_pool
     if not memory_ids:
         return
@@ -179,11 +179,11 @@ async def increment_memory_usage(memory_ids: List[str], current_turn: int) -> No
     if pool is None:
         return
     async with pool.acquire() as conn:
-        # Use parameterized query for safety
         await conn.execute("""
             UPDATE memories
             SET usage_count = usage_count + 1,
-                last_retrieved_turn = $2
+                last_retrieved_turn = $2,
+                significance = LEAST(1.0, significance + 0.005)
             WHERE id = ANY($1::text[])
         """, memory_ids, current_turn)
 
@@ -201,6 +201,8 @@ async def retrieve_candidates_hybrid(
     Executes a unified vector + BM25 keyword + recency candidate search.
     Returns up to `limit` candidates with computed scores.
     """
+    if not query or not query.strip():
+        return []    
     from db.connection import get_pool
     pool = await get_pool()
     if pool is None:
@@ -219,7 +221,7 @@ async def retrieve_candidates_hybrid(
             FROM memories
             WHERE session_id = $3 AND embedding IS NOT NULL
               AND (
-                1 - (embedding <=> $1::vector) > 0.45
+                1 - (embedding <=> $1::vector) > 0.3
                 OR text_search_vector @@ plainto_tsquery('english', $2)
               )
             ORDER BY vector_similarity DESC

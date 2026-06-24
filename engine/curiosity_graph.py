@@ -6,10 +6,11 @@ Optimized with multi-row batch upserts, thread‑safe lock, and strict async pat
 
 import json
 import asyncio
+import hashlib
+import networkx as nx
+
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
-
-import networkx as nx
 from db.connection import get_pool
 
 
@@ -19,7 +20,7 @@ class CuriosityGraph:
         self._sync_task: Optional[asyncio.Task] = None
         self._sync_event: Optional[asyncio.Event] = None
         self._should_stop: bool = False
-        self._lock = asyncio.Lock()          # <-- ADDED: protects all graph operations
+        self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         async with self._lock:
@@ -45,19 +46,47 @@ class CuriosityGraph:
                     self._graph.add_edge(e["source_id"], e["target_id"], weight=e["weight"])
             print(f"🧠 Curiosity graph loaded: {len(self._graph.nodes)} nodes, {len(self._graph.edges)} edges")
 
-    async def add_node(self, question: str, importance: float = 0.5) -> None:
+    async def add_node(
+        self,
+        question: str,
+        importance: float = 0.5,
+        session_id: Optional[str] = None,
+        origin_trace_id: Optional[str] = None
+    ) -> str:
+        """
+        Add a curiosity node with session isolation and traceability.
+        Returns 'created', 'updated', 'skipped', or 'error'.
+        """
         async with self._lock:
             if self._graph is None:
-                return
-            node_id = question.lower().strip().replace(" ", "_")
+                return "error"
+
+            clean_text = question.strip().lower()
+            text_hash = hashlib.sha256(clean_text.encode('utf-8')).hexdigest()[:16]
+            node_id = f"{session_id or 'default'}_{text_hash}" if session_id else text_hash
+
+            # Check if node already exists
+            if node_id in self._graph:
+                existing_importance = self._graph.nodes[node_id].get("importance", 0)
+                if importance > existing_importance:
+                    self._graph.nodes[node_id]["importance"] = importance
+                    self._graph.nodes[node_id]["last_trace_id"] = origin_trace_id
+                    self._graph.nodes[node_id]["last_referenced"] = datetime.now(timezone.utc).isoformat()
+                return "updated"
+
+            # Add new node
             self._graph.add_node(
                 node_id,
                 core_question=question,
-                importance=importance,
-                exploration_progress=0.0,
-                last_referenced=datetime.now(timezone.utc).isoformat()
+                importance=max(0.0, min(1.0, importance)),
+                session_id=session_id,
+                origin_trace_id=origin_trace_id,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                last_referenced=datetime.now(timezone.utc).isoformat(),
+                exploration_progress=0.0
             )
-        await self._queue_sync()
+            await self._queue_sync()
+            return "created"
 
     async def update_edge(self, node1: str, node2: str, delta: float = 0.05) -> None:
         async with self._lock:
@@ -152,18 +181,16 @@ class CuriosityGraph:
             async with pool.acquire() as conn:
                 async with conn.transaction():
                     if node_ids:
-                        # Fixed batch insertion – generate timestamps array of correct length
-                        timestamps = [datetime.now(timezone.utc)] * len(node_ids)
                         await conn.execute("""
-                            INSERT INTO curiosity_nodes (id, core_question, importance, exploration_progress, last_referenced, properties)
-                            SELECT * FROM UNNEST($1::TEXT[], $2::TEXT[], $3::FLOAT[], $4::FLOAT[], $5::TIMESTAMP[], $6::JSONB[])
+                            INSERT INTO curiosity_nodes (id, core_question, importance, exploration_progress, properties)
+                            SELECT * FROM UNNEST($1::TEXT[], $2::TEXT[], $3::FLOAT[], $4::FLOAT[], $5::JSONB[])
                             ON CONFLICT (id) DO UPDATE
                             SET core_question = EXCLUDED.core_question,
                                 importance = EXCLUDED.importance,
                                 exploration_progress = EXCLUDED.exploration_progress,
                                 last_referenced = NOW(),
                                 properties = EXCLUDED.properties
-                        """, node_ids, questions, importances, progresses, timestamps, properties_json)
+                        """, node_ids, questions, importances, progresses, properties_json)
 
                     if edge_sources:
                         await conn.execute("""
@@ -175,6 +202,7 @@ class CuriosityGraph:
 
 
 _graph_manager: Optional[CuriosityGraph] = None
+
 
 async def get_graph_manager() -> CuriosityGraph:
     global _graph_manager

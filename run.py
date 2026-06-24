@@ -88,6 +88,8 @@ async def main():
         while True:
             try:
                 user = await ainput("You> ")
+                if not user.strip():
+                    continue
             except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\nAborting...")
                 break

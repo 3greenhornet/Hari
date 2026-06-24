@@ -142,13 +142,13 @@ async def _compute_pressure_field(
 
     # 3. Curiosity Pressure: knowledge gap potential
     curiosity_pressure = state.curiosity
-    if candidate.get("item_type") == "curiosity":
+    if candidate.get("item_type") == "curiosity_node":
         curiosity_pressure *= 1.5   # boost for actual curiosity nodes
     pressures["curiosity"] = min(1.0, curiosity_pressure)
 
     # 4. Completion Pressure: finish ongoing thoughts
     completion_pressure = state.completion
-    if candidate.get("item_type") in ("open_thread", "narrative"):
+    if candidate.get("item_type") in ("open_thread", "narrative_thread"):
         # Open threads get an extra boost from their own urgency
         urgency = candidate.get("urgency", 0.5)
         completion_pressure = (completion_pressure + urgency) / 2
@@ -235,20 +235,30 @@ def _softmax(scores: List[float], temperature: float) -> List[float]:
 
 
 def broadcast_feedback(elected: List[WorkspaceItem], state: HariState) -> None:
-    """
-    Update state drives based on workspace composition.
-    Closes the cognitive loop.
-    """
     if not elected:
         return
-    # Curiosity: ratio of curiosity_nodes in workspace
-    curiosity_ratio = sum(1 for item in elected if item.item_type == "curiosity_node") / len(elected)
-    state.curiosity = min(1.0, state.curiosity + (curiosity_ratio * 0.05))
-    # Coherence: if narrative threads dominate, boost coherence
-    narrative_ratio = sum(1 for item in elected if item.item_type == "narrative_thread") / len(elected)
-    state.coherence = min(1.0, state.coherence + (narrative_ratio * 0.03))
-    # Engagement: if user input is highly attended (relevance pressure high), boost engagement slightly
-    # This is optional; can be extended.
+    n = len(elected)
+
+    curiosity_ratio = sum(1 for item in elected if item.item_type == "curiosity_node") / n
+    narrative_ratio = sum(1 for item in elected if item.item_type == "narrative_thread") / n
+    open_thought_ratio = sum(1 for item in elected if item.item_type == "open_thought") / n
+
+    state.curiosity = min(1.0, state.curiosity + curiosity_ratio * 0.025)
+    state.coherence = min(1.0, state.coherence + narrative_ratio * 0.015)
+
+    engagement_boost = (open_thought_ratio + narrative_ratio) * 0.02
+    state.engagement = min(1.0, state.engagement + engagement_boost)
+    state.care = min(1.0, state.care + engagement_boost * 0.25)
+
+    diversity = len({item.item_type for item in elected}) / max(n, 1)
+    state.arousal = min(1.0, state.arousal + diversity * 0.015)
+
+    completion_ratio = sum(1 for item in elected if item.item_type == "open_thread") / n
+    state.completion = min(1.0, state.completion + completion_ratio * 0.025)
+
+    positive = sum(1 for item in elected if item.payload.get("memory_emotional_tone") == "positive") / n
+    negative = sum(1 for item in elected if item.payload.get("memory_emotional_tone") == "negative") / n
+    state.valence = max(-1.0, min(1.0, state.valence + positive * 0.025 - negative * 0.025))
 
 
 # -----------------------------------------------------------------------------
@@ -307,10 +317,12 @@ async def load_workspace(
         })
     # Add hypotheses
     for hyp in hypotheses:
+        extracted_text = (hyp.get("content") or hyp.get("statement") or "").strip()
+        if not extracted_text:
+            continue
         add_candidate("hypothesis", hyp.get("id", "unknown"), {
-            "content": hyp.get("statement", ""),
-            "embedding": hyp.get("embedding"),
-            "confidence": hyp.get("confidence", 0.5),
+            "content": extracted_text,
+            "urgency": float(hyp.get("confidence") or hyp.get("urgency") or 0.5),
             "id": hyp.get("id"),
         })
     # Add curiosity nodes
@@ -323,10 +335,11 @@ async def load_workspace(
         })
     # Add narrative threads
     for thread in narrative_threads:
+        # Use actual NarrativeThread model fields
         add_candidate("narrative_thread", thread.id, {
-            "content": thread.goal_description,
+            "content": thread.description,                          # was goal_description
             "completion_estimate": thread.completion_estimate,
-            "activation": thread.activation,
+            "activation": thread.emotional_investment,              # was activation
             "id": thread.id,
         })
     # Add open threads

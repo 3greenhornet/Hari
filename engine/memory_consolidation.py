@@ -16,13 +16,14 @@ import logging
 import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Literal
+import re
 
+from litellm import acompletion
 from pydantic import BaseModel, Field
 from google.genai import types
 from db.connection import get_pool
 from models.memory_event import MemoryEvent
 from models.hypothesis import Hypothesis
-from engine.client import get_genai_client, ensure_genai_available
 
 logger = logging.getLogger(__name__)
 
@@ -119,24 +120,13 @@ async def classify_content_density(content: str) -> Literal["sparse", "dense"]:
 async def promote_to_hypothesis(memory: MemoryEvent) -> Optional[Hypothesis]:
     """
     Extract a user/self/world hypothesis from a significant memory.
-    Uses Pydantic structured output for guaranteed type-safe extraction.
-
-    CRITICAL: This function checks `promoted_to_hypothesis` flag.
-    If the memory has already been promoted, it returns None.
+    Uses the LiteLLM fallback cascade for resilience.
     """
-    # Guard: skip if already promoted
     if getattr(memory, 'promoted_to_hypothesis', False):
-        logger.debug(f"Skipping memory {memory.id} – already promoted to hypothesis")
+        logger.info(f"Memory {memory.id} already promoted, skipping.")
         return None
-
     if memory.significance < SIGNIFICANCE_PROMOTION_THRESHOLD:
         return None
-
-    if not await ensure_genai_available():
-        logger.warning("Gemini unavailable – cannot promote hypothesis")
-        return None
-
-    client = get_genai_client()
 
     prompt = f"""Analyze this memory and extract a structured hypothesis.
 
@@ -149,50 +139,73 @@ Determine which type of hypothesis this relates to:
 - "self": Something about Hari's own tendencies or identity  
 - "world": Something about external reality
 
-IMPORTANT: Output MUST conform to the ExtractedHypothesis schema.
+Return ONLY a valid JSON object with exactly these fields:
+- "type": one of "user", "self", "world"
+- "statement": a concise declarative sentence (max 200 chars)
+- "confidence": a float between 0.0 and 1.0
+
+Example:
+{{"type": "self", "statement": "I am uncomfortable with unstructured conversation.", "confidence": 0.8}}
 """
 
-    try:
-        response = await client.aio.models.generate_content(
-            model=CONSOLIDATION_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ExtractedHypothesis,
-                temperature=0.2
-            )
-        )
+    messages = [
+        {"role": "system", "content": "You are a hypothesis extraction engine. Output only valid JSON with the exact fields: type, statement, confidence."},
+        {"role": "user", "content": prompt}
+    ]
 
-        if response.parsed:
-            extracted: ExtractedHypothesis = response.parsed
+    from engine.stage1_monologue import MONOLOGUE_FALLBACK_MODELS
+    for model in MONOLOGUE_FALLBACK_MODELS:
+        try:
+            kwargs = {"model": model, "messages": messages, "temperature": 0.2, "timeout": 3}
+            # Use native JSON response format where supported
+            if not model.startswith("openrouter"):
+                kwargs["response_format"] = {"type": "json_object"}
+
+            response = await acompletion(**kwargs)
+            raw = response.choices[0].message.content.strip()
+
+            # Extract JSON from the response
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not match:
+                logger.warning(f"Model {model} returned no JSON object.")
+                continue
+
+            data = json.loads(match.group(0))
+
+            # Default type to "world" if missing
+            hypo_type = data.get("type", "world")
+            statement = data.get("statement", "")
+            confidence = data.get("confidence", 0.5)
+
+            if not statement:
+                logger.warning(f"Model {model} returned empty statement.")
+                continue
+
             hypothesis = Hypothesis(
-                statement=extracted.statement,
-                confidence=extracted.confidence,
+                type=hypo_type,                # <-- this is the real fix
+                statement=statement,
+                confidence=confidence,
                 supporting_event_ids=[memory.id] if memory.id else [],
                 contradicting_event_ids=[],
                 last_updated=datetime.utcnow()
             )
-            # Attach the extracted type for use in run_consolidation
-            hypothesis._extracted_type = extracted.type
+            # No need for _extracted_type; it's already in hypothesis.type
 
-            # Structured telemetry
             logger.info(json.dumps({
                 "event": "hypothesis_promoted",
                 "memory_id": memory.id,
-                "hypothesis_type": extracted.type,
-                "confidence": extracted.confidence,
-                "statement_preview": extracted.statement[:100]
+                "hypothesis_type": hypo_type,
+                "confidence": confidence,
+                "statement_preview": statement[:100]
             }))
-
             return hypothesis
-        else:
-            logger.warning(f"⚠️ No parsed hypothesis for memory {memory.id}")
-            return None
 
-    except Exception as e:
-        logger.error(f"❌ Hypothesis extraction failed for memory {memory.id}: {e}")
-        return None
+        except Exception as e:
+            logger.warning(f"Promotion failed with model {model}: {e}")
+            continue
 
+    logger.error(f"All models failed to promote memory {memory.id}")
+    return None
 
 async def store_hypothesis(hypothesis: Hypothesis, hypothesis_type: str) -> None:
     """
@@ -380,6 +393,8 @@ async def run_consolidation(session_id: str, turn_count: int) -> Dict[str, Any]:
                 LIMIT 20
             """, SIGNIFICANCE_PROMOTION_THRESHOLD, session_id)
 
+            logger.info(f"CONSOLIDATION_QUERY: found {len(significant_memories)} high‑significance unpromoted memories")
+
         for mem_data in significant_memories:
             try:
                 memory = MemoryEvent(
@@ -392,6 +407,7 @@ async def run_consolidation(session_id: str, turn_count: int) -> Dict[str, Any]:
                     created_at=mem_data["created_at"],
                     promoted_to_hypothesis=mem_data.get("promoted_to_hypothesis", False)  # pass flag
                 )
+                logger.info(f"PROMOTION_ATTEMPT: memory_id={memory.id} significance={memory.significance}")
                 hypothesis = await promote_to_hypothesis(memory)
                 if hypothesis:
                     # The extracted type is attached as _extracted_type
