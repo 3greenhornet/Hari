@@ -20,7 +20,6 @@ import re
 
 from litellm import acompletion
 from pydantic import BaseModel, Field
-from google.genai import types
 from db.connection import get_pool
 from models.memory_event import MemoryEvent
 from models.hypothesis import Hypothesis
@@ -135,8 +134,8 @@ Memory content: "{memory.content[:500]}"
 Role: {memory.role}
 
 Determine which type of hypothesis this relates to:
-- "user": Something about the user's values, beliefs, or patterns
-- "self": Something about Hari's own tendencies or identity  
+- "user": Something about the user\'s values, beliefs, or patterns
+- "self": Something about Hari\'s own tendencies or identity  
 - "world": Something about external reality
 
 Return ONLY a valid JSON object with exactly these fields:
@@ -189,7 +188,7 @@ Example:
                 contradicting_event_ids=[],
                 last_updated=datetime.utcnow()
             )
-            # No need for _extracted_type; it's already in hypothesis.type
+            # No need for _extracted_type; it\'s already in hypothesis.type
 
             logger.info(json.dumps({
                 "event": "hypothesis_promoted",
@@ -259,48 +258,36 @@ def _extract_key_facts(content: str) -> str:
 
 async def _summarize_sparse_content(content: str) -> str:
     """
-    Summarize sparse/conversational content using LLM with structured output.
-    Fallback to extractive summary if Gemini fails.
+    Summarize sparse/conversational content using LiteLLM fallback.
+    If all models fail, fallback to extractive summary (first 3 sentences).
     """
-    if not await ensure_genai_available():
-        # Deterministic fallback: extractive summary (first 2-3 sentences)
-        sentences = content.split('.')
-        fallback_summary = '. '.join(sentences[:3])[:MAX_SUMMARY_LENGTH]
-        logger.warning(f"⚠️ LLM unavailable for summarization – using extractive fallback")
-        return fallback_summary
-
-    client = get_genai_client()
+    from engine.stage1_monologue import MONOLOGUE_FALLBACK_MODELS
 
     prompt = f"""Summarize this conversational content in a concise way, focusing on key topics and insights:
 
-{content[:800]}
+{content[:800]}"""
 
-IMPORTANT: Output MUST conform to the SegmentSummary schema."""
-
-    try:
-        response = await client.aio.models.generate_content(
-            model=CONSOLIDATION_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=SegmentSummary,
-                temperature=0.3
+    messages = [
+        {"role": "system", "content": "You are a summarization assistant. Output only the summary, no extra text."},
+        {"role": "user", "content": prompt}
+    ]
+    for model in MONOLOGUE_FALLBACK_MODELS:
+        try:
+            response = await acompletion(
+                model=model,
+                messages=messages,
+                temperature=0.3,
+                timeout=5
             )
-        )
-
-        if response.parsed:
-            summary_data: SegmentSummary = response.parsed
-            return summary_data.summary[:MAX_SUMMARY_LENGTH]
-        else:
-            # Fallback: extractive
-            sentences = content.split('.')
-            return '. '.join(sentences[:3])[:MAX_SUMMARY_LENGTH]
-
-    except Exception as e:
-        logger.error(f"❌ Summarization failed: {e}")
-        # Fallback: extractive
-        sentences = content.split('.')
-        return '. '.join(sentences[:3])[:MAX_SUMMARY_LENGTH]
+            summary = response.choices[0].message.content.strip()
+            if summary:
+                return summary[:MAX_SUMMARY_LENGTH]
+        except Exception as e:
+            logger.warning(f"Summarization with {model} failed: {e}")
+            continue
+    # Fallback: extractive summary
+    sentences = content.split(".")
+    return ". ".join(sentences[:3])[:MAX_SUMMARY_LENGTH]
 
 
 async def archive_old_memories(session_id: str, older_than_days: int = ARCHIVE_OLDER_THAN_DAYS) -> int:
@@ -380,7 +367,7 @@ async def run_consolidation(session_id: str, turn_count: int) -> Dict[str, Any]:
     }
 
     try:
-        # 1. Find high-significance memories that haven't been promoted yet
+        # 1. Find high-significance memories that haven\'t been promoted yet
         async with pool.acquire() as conn:
             significant_memories = await conn.fetch("""
                 SELECT id, content, role, significance, session_id, turn_number, created_at,
