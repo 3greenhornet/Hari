@@ -473,10 +473,10 @@ CREATE TABLE IF NOT EXISTS memory_retrieval_logs (
 
 -- Optimized HNSW index for vector similarity search
 -- For datasets under 1M rows, HNSW provides excellent recall and speed
-CREATE INDEX IF NOT EXISTS memories_embedding_hnsw_idx 
-ON memories 
-USING hnsw (embedding vector_cosine_ops)
-WITH (m = 16, ef_construction = 64);
+--CREATE INDEX IF NOT EXISTS memories_embedding_hnsw_idx 
+--ON memories 
+--USING hnsw (embedding vector_cosine_ops)
+--WITH (m = 16, ef_construction = 64);
 
 -- CRITICAL MIGRATION for Phase 6:
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS promoted_to_hypothesis BOOLEAN DEFAULT FALSE;

@@ -13,7 +13,7 @@ CREATE TABLE memories (
     thematic_tags TEXT[],
     significance FLOAT,
     meaning_summary TEXT,
-    embedding vector(768),
+    embedding vector(3072),
     created_at TIMESTAMP DEFAULT NOW()
 );
 

@@ -75,4 +75,6 @@
 - **Spontaneous topic initiation:** ~1 per 8–10 turns (target ≥ 1 per 5) ⚠️ improving
 
 ---
-
+### Architectural Debt
+- [ ] Wire all persistence (self-beliefs, hypotheses, narratives, curiosity) through `promotions.py` (Sprint 3)
+- [ ] Currently, multiple modules bypass promotions – this is a known debt

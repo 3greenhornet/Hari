@@ -1,0 +1,30 @@
+# Design docs (we already have the blueprint in chat)
+_framework_extracted.txt
+packages.txt
+AGENTS.md
+CLAUDE.md
+HARI_COGNITIVE_ECOLOGY.md
+TODO.md
+_framework_extracted.txt
+
+# Entry points (not changing these yet)
+run.py
+app.py
+
+# Environment and config
+.env
+.env.example
+requirements.txt
+.gitignore
+bundle.py
+
+# Generated output
+*.xml
+*.log
+
+# Non-code directories
+tests/
+__pycache__/
+.venv/
+venv/
+.git/

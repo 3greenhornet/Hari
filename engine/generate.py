@@ -25,6 +25,7 @@ from models.decision_trace import DecisionTrace, WorkspaceItemTrace
 from engine.attention import load_workspace, broadcast_feedback, WorkspaceItem, load_workspace_secured
 from engine.curiosity_graph import get_graph_manager
 from engine.narrative_manager import NarrativeManager
+from engine.self_belief import SelfBeliefManager
 
 
 # -----------------------------------------------------------------------------
@@ -221,6 +222,9 @@ class TurnPipeline:
             user_input, self.state, candidates, prediction_error=surprise
         )
         logger.info(f"MONOLOGUE_RAW: {monologue_output.model_dump_json(indent=2)}")
+
+        if monologue_output.self_belief_update:
+            await SelfBeliefManager.store(self.session_id, monologue_output.self_belief_update)
 
         # Step 3b: Update grace tracker with monologue's engagement estimate
         self.grace_tracker.add_engagement_score(monologue_output.user_engagement_estimate)

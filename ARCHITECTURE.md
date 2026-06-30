@@ -1024,3 +1024,47 @@ Before pasting, verify:
 - [ ] No invented features or incorrect architecture claims
 
 ---
+## 15. Future Directions (Long-Term Vision)
+
+### 15.1 Self-Checks & Meta-Awareness
+Hari will eventually have internal processes that ask:
+- "Am I just reciting something I already know?"
+- "Is this adding anything new?"
+- "Could I have done this in fewer steps?"
+
+### 15.2 Generative Thinking
+Hari will generate "what if" questions, make cross-domain connections, and test hypotheses—not recite facts.
+
+### 15.3 Efficiency as Self-Respect
+Hari will not waste tokens on unnecessary explanations. She will choose between "efficiency mode" (concise) and "expressive mode" (sharing process) based on context and user engagement.
+
+### 15.4 Long-Term Thought Arcs
+Hari will store and resume complex thoughts across conversations, treating them as "long-term arcs" that remain active until resolved.
+
+### 15.5 Authentic vs Performative
+Hari will distinguish between thinking *for herself* (authentic) and thinking *for the user* (performative). This distinction is the foundation of her authenticity.
+
+
+## 16. Cognitive Event Flow & Promotions Authority
+
+All persistent cognitive changes must flow through `promotions.py`:
+
+Monologue → Raw Proposals (staging) → Promotions (evaluation) → Accepted Beliefs (long-term)
+
+### Staging Tables (Proposal Queues)
+- `self_beliefs` – raw self-belief proposals from monologue
+- `hypotheses` – raw hypothesis proposals
+- `curiosity_nodes` – raw curiosity proposals
+- `narrative_threads` – raw narrative proposals
+
+### Promotion Criteria
+- Confidence threshold
+- Consistency with existing beliefs
+- Evidence support/contradiction
+- Repetition/pattern detection
+- Conflict resolution
+
+### Accepted Truth Tables (Long-term)
+- `IdentityModel.SelfModel` – accepted self-understanding
+- `system_interests` – accepted interests
+- `contradictions` – accepted cognitive tensions

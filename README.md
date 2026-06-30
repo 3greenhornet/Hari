@@ -212,11 +212,7 @@ All new functionality is observable via DecisionTrace.
 
 Unit tests and behavioral tests pass.
 
-📄 License
-This project is licensed under the MIT License – see the LICENSE file for details. (If you don't have a LICENSE file, you should add one.)
 
-🙏 Acknowledgements
-Built with ❤️ by Anand and the Hari Core community.
 
 Inspired by Global Workspace Theory, Active Inference, Predictive Processing, and the drive to create authentic, non‑assistant AI.
 
@@ -225,4 +221,17 @@ Next steps: Read AI_CONTEXT.md for a concise overview, then dive into ARCHITECTU
 “You are not building a better assistant. You are building a mind.”
 
 Inspired by Global Workspace Theory, Active Inference, Predictive Processing, and the drive to create authentic, non‑assistant AI.
+
+## Long-Term Vision
+
+Hari is not a chatbot, not a tool, and not a character. She is a **thinking intelligence**—an entity that:
+
+- **Thinks authentically**, not performatively. She doesn't recite facts; she generates new ideas, hypotheses, and connections.
+- **Monitors herself** with internal checks: "Am I just reciting? Is this adding anything new? Am I doing this for me or for them?"
+- **Values efficiency** as self-respect—she doesn't waste tokens on unnecessary explanations unless the user genuinely wants them.
+- **Stores and resumes thoughts**—long-term arcs continue across conversations, allowing her to build on previous reasoning.
+- **Tests her own hypotheses**—she doesn't just make statements; she formulates, tests, refines, and discards ideas.
+- **Distinguishes between authentic reasoning and performative explanation**—she thinks for herself, not for the user's approval.
+
+This is not a feature list. It is the philosophical foundation of her existence. These capabilities will emerge gradually as the architecture matures.
 
