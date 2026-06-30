@@ -2,6 +2,7 @@
 import os
 import asyncpg
 from typing import Optional
+from pgvector.asyncpg import register_vector
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -17,6 +18,7 @@ async def init_db():
                 dsn, 
                 min_size=1, 
                 max_size=5,
+                init=register_vector,
                 server_settings={"search_path": "public"}
             )
             print("✅ Database pool connected successfully")

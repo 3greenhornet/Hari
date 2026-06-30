@@ -1,4 +1,4 @@
-﻿# Hari Core – AI Collaboration Guide
+﻿# Hari Core – AI Collaboration Guide (Updated 2026-06-25)
 
 This document defines the architectural boundaries and non‑negotiable rules for the Hari Core cognitive engine. It is the single source of truth for any AI agent (including Claude) working on this codebase. **Read it carefully before writing any code.**
 
@@ -33,8 +33,11 @@ No subsystem may inject text into the dialogue prompt without first becoming a `
 **LLM is a sensory organ, not a decision‑maker**  
 The monologue outputs only observations (continuity, engagement, intent with confidence). No command flags like `finish_thought_first`.
 
-**No heuristics**  
-Never write `if state.X > threshold: response = ...`. State only influences attention via pressure fields.
+**No hardcoded heuristics**  
+Never write `if state.X > threshold: response = ...`. State only influences attention via pressure fields. This includes:
+- ❌ No `if len(user) < 10: state.update(...)`
+- ❌ No `if topic_shift > threshold: question_user()`
+- ❌ No direct drive-to-response mappings
 
 **Asymptotic saturation**  
 All state updates use `new = current + α * Δ * (1 - current)` or `current + α * Δ * current` with α = 0.25.
@@ -48,6 +51,9 @@ All LLM calls go through `providers/` abstraction. No direct `google.genai` impo
 **Cross‑session memory**  
 No memory shared across different session IDs. Within a session, memory persists across restarts.
 
+**No prompt leakage**  
+The dialogue model must never see raw state variables, workspace weights, or implementation details. Only interpreted state (e.g., "slightly curious") should be exposed.
+
 ---
 
 ## 3. File‑by‑File Reference
@@ -57,16 +63,18 @@ This section lists every file in the project along with its responsibility. **Do
 ### 3.1 Core Engine (`engine/`)
 
 - **`generate.py`** – `TurnPipeline` orchestrator. Key function: `execute()` calls prediction, memory, monologue, workspace, dialogue. ✅ Safe to edit.
-- **`attention.py`** – Workspace competition. Key function: `load_workspace()` returns `(workspace_items, telemetry)`. ✅ Safe.
-- **`memory.py`** – Embeddings, retrieval, batch usage updates. Key functions: `retrieve_candidates()`, `increment_memory_usage()`. ✅ Safe.
+- **`attention.py`** – Workspace competition. Key functions: `load_workspace()`, `load_workspace_secured()`, `apply_workspace_diversity_penalty()`. ✅ Safe.
+- **`memory.py`** – Embeddings, hybrid retrieval (vector + BM25 + recency + drive boost), batch usage updates. Key functions: `retrieve_candidates_hybrid()`, `increment_memory_usage()`. ✅ Safe.
 - **`prediction.py`** – Surprise calculation. Key function: `compute_prediction_error()` (cosine similarity). ✅ Safe.
-- **`stage1_monologue.py`** – Sensory perception. Key function: `run_monologue()` returns `MonologueOutput`. ✅ Safe.
-- **`narrative_manager.py`** – Narrative persistence. Key functions: `load_active_threads()`, `touch_thread()`, `flush_updates()`. ✅ Safe.
-- **`curiosity_graph.py`** – Curiosity graph. Key functions: `add_node()`, `decay()`, `get_top_nodes()`. ✅ Safe.
-- **`memory_consolidation.py`** – Hypothesis promotion, archival. Key function: `run_consolidation()`. ✅ Safe.
+- **`stage1_monologue.py`** – Sensory perception. Key function: `run_monologue()` returns `MonologueOutput`. ✅ Safe (Groq fallback active).
+- **`narrative_manager.py`** – Narrative persistence. Key functions: `load_active_threads()`, `create_thread()`, `update_thread()`. ✅ Safe.
+- **`curiosity_graph.py`** – Curiosity graph. Key functions: `add_node()`, `decay()`, `get_top_nodes()`. **Now wired** – session isolation and traceability active.
+- **`memory_consolidation.py`** – Hypothesis promotion, archival. Key function: `run_consolidation()`. ✅ Safe (LiteLLM cascade).
 - **`consolidation_worker.py`** – Background worker. Key functions: `ConsolidationManager.start()/stop()`. ✅ Safe.
-- **`promotions.py`** – **Stub** – central creation authority. Key functions: `promote_memory_to_hypothesis()`, `archive_inactive_structures()`. ⚠️ Stub only – implement only when asked.
-- **`client.py`** – Gemini rate limiting, retries. Key functions: `get_genai_client()`, `call_gemini_json()`. ✅ Safe.
+- **`promotions.py`** – **Stub** – central creation authority. ⚠️ Currently bypassed for testing; direct wiring used for curiosity, narrative, and significance.
+- **`dispatcher.py`** – **Future** – cognitive side‑effect dispatcher (deferred, not yet implemented).
+- **`health.py`** – Health dashboard. Single‑pass metrics for workspace_empty_rate, active_interests, etc. ✅ Safe.
+- **`development.py`** – DevelopmentLedger storage. ✅ Safe.
 
 ### 3.2 Psyche (`psyche/`)
 
@@ -76,11 +84,13 @@ This section lists every file in the project along with its responsibility. **Do
 
 ### 3.3 Models (`models/`)
 
-- **`memory_event.py`** – `MemoryEvent` with `usage_count`, `last_retrieved_turn`, `explanatory_power`.
+- **`memory_event.py`** – `MemoryEvent` with `usage_count`, `last_retrieved_turn`, `explanatory_power`, `computed_score`.
 - **`narrative.py`** – `NarrativeThread` – pure data (no activation, decay).
 - **`monologue_output.py`** – Sensory observations only.
 - **`hypothesis.py`** – `Hypothesis` with `type` (user/self/world).
 - **`curiosity_node.py`** – `CuriosityNode`.
+- **`decision_trace.py`** – Full audit trail with winners/losers.
+- **`development_event.py`** – Event‑sourcing for promotions and identity formation.
 - **`workspace.py`** – Optional alias (can be removed).
 
 ### 3.4 Providers (`providers/`)
@@ -97,30 +107,34 @@ This section lists every file in the project along with its responsibility. **Do
 
 ---
 
-## 4. Subsystem Status (Phase 6 – All Completed)
+## 4. Subsystem Status (Phase C – Complete)
 
-All core subsystems are production‑ready. No major rewrites are needed.
+All core subsystems are now operational. No major rewrites are needed.
 
-- State & Drives (`psyche/state.py`, `cascades.py`) – ✅ Complete
-- Grace (engagement) (`psyche/grace.py`) – ✅ Complete
-- Prediction error (`engine/prediction.py`) – ✅ Complete
-- Memory retrieval (`engine/memory.py`) – ✅ Complete
-- Workspace attention (`engine/attention.py`) – ✅ Complete
-- Sensory monologue (`engine/stage1_monologue.py`) – ✅ Complete
-- Dialogue generation (`engine/generate.py`) – ✅ Complete
-- Narrative threads (`models/narrative.py`, `engine/narrative_manager.py`) – ✅ Complete
-- Curiosity graph (`engine/curiosity_graph.py`) – ✅ Complete
-- Memory consolidation (`engine/memory_consolidation.py`) – ✅ Complete
-- Consolidation worker (`engine/consolidation_worker.py`) – ✅ Complete
-- Provider abstraction (`providers/`) – ✅ Complete
-- Evaluation (`tests/evaluator.py`) – ✅ Complete
-- Entry point (`run.py`) – ✅ Complete
+| System | Status | Notes |
+| :--- | :--- | :--- |
+| State & Drives | ✅ Complete | Asymptotic updates, cascades, natural drift |
+| Grace (engagement) | ✅ Complete | Rolling engagement tracker |
+| Prediction error | ✅ Complete | Cosine similarity |
+| Memory retrieval | ✅ Complete | Hybrid retrieval (vector + BM25 + recency + drive boost) |
+| Workspace attention | ✅ Complete | Pressure fields, softmax, diversity penalty, 3‑layer fallback |
+| Sensory monologue | ✅ Complete | Groq fallback (Gemini 429 resolved) |
+| Dialogue generation | ✅ Complete | LiteLLM fallback chain |
+| Narrative threads | ✅ Complete | Creation, persistence, timezone‑safe |
+| Curiosity graph | ✅ Complete | Wired, session isolation, traceability (84 nodes) |
+| Memory consolidation | ✅ Complete | LiteLLM cascade, 5 hypotheses created |
+| Consolidation worker | ✅ Complete | Background processing |
+| DecisionTrace | ✅ Complete | Full audit trail (84 traces, 409 items) |
+| Health Dashboard | ✅ Complete | Single‑pass metrics |
+| Memory significance | ✅ Complete | Wired and varying (0.4–0.92) |
+| Retrieval reinforcement | ✅ Complete | `significance += 0.005` per retrieval |
+| Dynamic candidates | ✅ Complete | Top‑2 injected; occasionally wins workspace |
 
 ---
 
-## 5. What You Must NOT Do (Prohibition List)
+## 5. What You Must NOT Do (Prohibition List – Expanded)
 
-The following features are **explicitly rejected** for Phase 6. Do not implement them under any circumstances.
+The following features are **explicitly rejected** for the current phase. Do not implement them under any circumstances.
 
 - ❌ Ebbinghaus forgetting curves or ACT‑R memory strength formulas
 - ❌ Any activation, persistence, decay, or confidence fields inside `NarrativeThread`
@@ -131,34 +145,54 @@ The following features are **explicitly rejected** for Phase 6. Do not implement
 - ❌ Autonomous narrative creation from curiosity or memory (use `promotions.py` stub)
 - ❌ Multi‑tier memory implementation (episodic/semantic) – placeholders only, Phase 8
 - ❌ Emotional simulation, mood engines, or personality scripts
+- ❌ **Prompt leakage** – exposing raw state variables, drive values, or workspace weights to the dialogue model
+- ❌ **Naïve datetime handling** – all timestamps must be timezone‑aware (`datetime.now(timezone.utc)`)
+- ❌ **Direct injection** of dynamic candidates without workspace competition
 
 ---
 
 ## 6. What Actually Remains (Priority‑Ordered)
 
-These are the **only** open items. Each is small and isolated.
+### Immediate Priorities (Current Sprint)
 
-### High Priority (Must Complete)
+- [ ] **Curiosity edges** – `update_edge()` exists but never called; nodes remain isolated
+- [ ] **Self‑belief persistence** – monologue outputs `self_belief_update`, but it is never stored
+- [ ] **Hypothesis update persistence** – monologue outputs `hypothesis_update`, not stored (distinct from promotion‑created hypotheses)
+- [ ] **Initiative boost for dynamic candidates** – when user explicitly asks for a new topic, boost their salience
+- [ ] **Prompt refinement** – further reduce mirroring and over‑analysis
 
-*None. All core subsystems are complete.*
+### Medium Priority (Next Sprint)
 
-### Medium Priority (Complete if time allows)
+- [ ] **`broadcast_feedback` strengthening** – increase coefficients so drives move more meaningfully
+- [ ] **Social cognition** – intent/tone detection, relationship tracking (Phase D)
+- [ ] **Identity anchors** – stable interests → identity (Phase D)
 
-- **Add memory retrieval telemetry** in `engine/memory.py`. Inside `retrieve_candidates()`, after obtaining results, insert a row into `memory_retrieval_logs` with `session_id`, `query_text`, `retrieved_count`, `similarity_avg`, `latency_ms`, `created_at`. (Observability)
-- **Add periodic promotion engine call** in `run.py`. Every 50 turns, call `archive_inactive_structures(turn)`. (Prepares for Phase 7)
-- **Create `tests/conftest.py`** to provide event loop and mock Gemini fixture. (Testability)
+### Low Priority (Deferred to Future Phases)
 
-### Low Priority (Defer to Phase 7)
-
-- Full `promotions.py` implementation (requires LLM calls)
-- Workspace telemetry dataclass (already dict‑based; optional)
-- Fallback chain (Gemini → Groq) – resilience, not core
-- Circuit breaker for LLM – resilience, not core
-- State checkpointing – persistence across restarts, not core
+- [ ] **Metacognition** – self‑assessment, confidence tracking (Phase F)
+- [ ] **System 3 / Persistent Agent** (Phase G)
+- [ ] **Persona Vectors / Activation Steering** – requires open‑weight models
+- [ ] **Fine‑Tuning** – no dataset, no compute
+- [ ] **Neuro‑Symbolic Self‑Modification** – far future
+- [ ] **Volition Engine** – self‑generated goals (Phase E)
+- [ ] **World Models** – need stable memory and promotions first
 
 ---
 
-## 7. Workflow & Testing
+## 7. Success Metrics (Current vs Target)
+
+| Metric | Current | Target | Status |
+| :--- | :--- | :--- | :--- |
+| Curiosity nodes | 86 | > 50 | ✅ |
+| Narrative threads | Created in sessions | > 3 | ✅ |
+| Hypotheses | 5 in DB | > 3 | ✅ |
+| Memory significance variation | 0.4–0.92 | Spread > 0.2 | ✅ |
+| Workspace empty rate | < 1% | < 5% | ✅ |
+| Spontaneous topic initiation | ~1 per 8‑10 turns | ≥ 1 per 5 | ⚠️ Improving |
+
+---
+
+## 8. Workflow & Testing
 
 ### Environment Setup
 
@@ -199,20 +233,23 @@ python -m tests.evaluator <session_id> --output eval.json
 
 ---
 
-## 8. Common Pitfalls (What Goes Wrong & How to Avoid)
+## 9. Common Pitfalls (What Goes Wrong & How to Avoid)
 
-Based on known issues with Claude‑assisted coding, watch for these failure modes:
+Based on known issues with Claude‑assisted coding and our own experience, watch for these failure modes:
 
-- **One‑shot prompting with broad instructions** – leads to shallow error handling and missing tests. Break work into well‑defined tasks. Each prompt should target a specific file or function.
-- **Session drift** – Claude starts fresh each conversation and forgets previous context. Use `CLAUDE.md` to encode persistent rules. Assume Claude has no memory of past fixes.
-- **Hallucinated imports, env vars, and API calls** – Claude invents non‑existent symbols. Always run `mypy` and `pytest` before committing. Keep file boundaries explicit.
-- **File bloat and code duplication** – Claude adds code without architectural awareness. Maintain a modular structure with clear responsibilities per file. Monitor diff sizes.
-- **False confidence from passing tests** – Claude writes tests that pass for the code it just wrote. Run tests with real LLM fallbacks. Add edge‑case coverage.
-- **Over‑engineering** – adding features not requested. Stick to the task list. Do not invent cognitive features.
+- **One‑shot prompting with broad instructions** – leads to shallow error handling and missing tests. Break work into well‑defined tasks.
+- **Session drift** – Claude starts fresh each conversation and forgets previous context. Use `CLAUDE.md` to encode persistent rules.
+- **Hallucinated imports, env vars, and API calls** – Always run `mypy` and `pytest` before committing. Keep file boundaries explicit.
+- **File bloat and code duplication** – Maintain modular structure with clear responsibilities per file.
+- **False confidence from passing tests** – Run tests with real LLM fallbacks. Add edge‑case coverage.
+- **Over‑engineering** – adding features not requested. Stick to the task list.
+- **Prompt leakage** – The dialogue model should never see raw state, drives, or workspace weights. Use interpreted summaries.
+- **Naïve datetime handling** – All timestamps must be timezone‑aware (`datetime.now(timezone.utc)`).
+- **Ignoring monologue outputs** – The monologue generates rich signals; ensure they are wired to persistent storage.
 
 ---
 
-## 9. How to Extend Hari (Phase 7+)
+## 10. How to Extend Hari (Phase 7+)
 
 The scaffold is designed for incremental, non‑breaking additions. To add a new cognitive feature:
 
@@ -224,7 +261,7 @@ The scaffold is designed for incremental, non‑breaking additions. To add a new
 
 ---
 
-## 10. Final Directive
+## 11. Final Directive
 
 > **You are not building a better assistant. You are building a mind. Trust the workspace. Trust the pressure fields. Trust emergence. Do not add shortcuts.**
 

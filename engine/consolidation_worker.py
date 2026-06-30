@@ -85,7 +85,8 @@ class ConsolidationManager:
             # Shield the final DB writes from cancellation during loop shutdown
             try:
                 await asyncio.shield(run_consolidation(self._session_id, 9999))
-                await asyncio.shield(decay_graph_nodes(decay_factor=0.99))
+                graph_manager = await get_graph_manager()
+                await asyncio.shield(graph_manager.decay(decay_factor=0.99))
             except RuntimeError as e:
                 if "Event loop is closed" in str(e):
                     logger.warning(f"⚠️ Loop already closed; final consolidation skipped: {e}")

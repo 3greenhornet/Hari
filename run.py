@@ -1,9 +1,21 @@
 ﻿# hari/run.py
 import asyncio
+import logging
 import os
 import uuid
 from dotenv import load_dotenv
 from contextvars import ContextVar
+
+load_dotenv()
+
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(levelname)s:%(name)s:%(message)s",
+    force=True,
+)
+
+_ctx_state: ContextVar[HariState] = ContextVar("hari_state")
 
 from psyche.state import HariState
 from psyche.grace import GraceTracker
@@ -20,10 +32,6 @@ from db.connection import init_db, close_db
 from engine.consolidation_worker import get_manager as get_consolidation_manager
 from utils.async_input import ainput
 from utils.logger import init_session_log, log_event
-
-load_dotenv()
-
-_ctx_state: ContextVar[HariState] = ContextVar("hari_state")
 
 async def main():
     print("🧠 Hari Core – Phase 1 (Full Pipeline Mode)")
