@@ -7,10 +7,15 @@ across conversations. Respects the distinction between permanent identity,
 slow-changing self-understanding, and accumulated shifts in perspective.
 """
 
-from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 from datetime import datetime, timezone
 
+from pydantic import BaseModel, Field, ConfigDict
+
+
+# ========================================================================
+# 1. EXISTING MODELS (UNCHANGED)
+# ========================================================================
 
 class PerspectiveShift(BaseModel):
     """
@@ -184,3 +189,79 @@ class IdentityModel(BaseModel):
             f"{self.self_model.accumulated_self_narrative}\n"
             f"Core commitments: {', '.join(self.self_model.core_commitments)}"
         )
+
+    # ========================================================================
+    # 2. NEW: COGNITIVE PROJECTION LAYER (Ticket 008)
+    # ========================================================================
+
+    def project(self, context: str = "dialogue") -> "IdentityProjection":
+        """
+        Project identity into a structured view for a specific consumer.
+
+        This is the canonical entry point for all consumers (dialogue, planning,
+        evaluation, reflection, etc.). It returns a *projection* – a structured
+        data object that contains only the information relevant to the consumer's
+        task, never raw internal state.
+
+        Args:
+            context: The consumer context. Supported values:
+                - "dialogue"       (default): natural language conversation
+                - "planning"       : structured goal/planning data
+                - "evaluation"     : metrics and telemetry
+                - "reflection"     : rich self‑awareness including questions
+                - "self_description": full self‑introduction including origin
+
+        Returns:
+            IdentityProjection: a structured, consumer‑specific projection.
+        """
+        # Determine what to include based on context
+        include_origin = context in ("self_description", "reflection")
+        include_self_questions = context in ("dialogue", "reflection", "self_description")
+
+        return IdentityProjection(
+            constitution_summary=self.constitution.as_immutable_block(),
+            self_narrative=self.self_model.accumulated_self_narrative,
+            core_commitments=self.self_model.core_commitments,
+            active_self_questions=self.self_model.active_self_questions if include_self_questions else None,
+            origin_summary=self.origin.as_prompt_block() if include_origin else None,
+            projection_context=context
+        )
+
+
+# ========================================================================
+# 3. NEW: PROJECTION MODEL (Ticket 008)
+# ========================================================================
+
+class IdentityProjection(BaseModel):
+    """
+    A structured, consumer-specific projection of identity.
+
+    This is NOT a prompt. It is a data structure that can be rendered into
+    any format (dialogue, planning, evaluation, etc.). It contains only the
+    information relevant to the consumer, never raw internal state.
+    """
+    constitution_summary: str = Field(
+        ..., description="The immutable constitutional principles (compressed)"
+    )
+    self_narrative: str = Field(
+        ..., description="Current self-understanding narrative"
+    )
+    core_commitments: List[str] = Field(
+        default_factory=list,
+        description="Core commitments that guide behavior"
+    )
+    active_self_questions: Optional[List[str]] = Field(
+        default=None,
+        description="Active self-questions, included only when requested by context"
+    )
+    origin_summary: Optional[str] = Field(
+        default=None,
+        description="Origin story, included only when requested by context"
+    )
+    projection_context: str = Field(
+        default="dialogue",
+        description="Who is consuming this projection? (dialogue, planning, evaluation, reflection, etc.)"
+    )
+
+
+# 

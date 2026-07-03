@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from db.connection import get_pool
 
 
+COACTIVATION_EDGE_DELTA = 0.05
+
 class CuriosityGraph:
     def __init__(self):
         self._graph: Optional[nx.Graph] = None
@@ -62,7 +64,7 @@ class CuriosityGraph:
                 return "error"
 
             clean_text = question.strip().lower()
-            text_hash = hashlib.sha256(clean_text.encode('utf-8')).hexdigest()[:16]
+            text_hash = hashlib.sha256(clean_text.encode("utf-8")).hexdigest()[:16]
             node_id = f"{session_id or 'default'}_{text_hash}" if session_id else text_hash
 
             # Check if node already exists
@@ -100,6 +102,28 @@ class CuriosityGraph:
             else:
                 self._graph.add_edge(n1, n2, weight=delta)
         await self._queue_sync()
+
+    async def observe_workspace(self, workspace_items: List[Any]) -> None:
+        """
+        Observe a workspace composition and learn associations.
+        Currently connects any co‑occurring curiosity nodes with a fixed delta.
+        Future: may also update node salience, decay, timestamps, etc.
+        """
+        curiosity_ids = set()
+        for item in workspace_items:
+            # Gracefully skip malformed items
+            if not hasattr(item, "item_type") or not hasattr(item, "payload"):
+                continue
+            if item.item_type == "curiosity_node":
+                node_id = item.payload.get("id")
+                if node_id:
+                    curiosity_ids.add(node_id)
+    
+        if len(curiosity_ids) >= 2:
+            node_list = list(curiosity_ids)
+            for i in range(len(node_list)):
+                for j in range(i + 1, len(node_list)):
+                    await self.update_edge(node_list[i], node_list[j], delta=COACTIVATION_EDGE_DELTA)
 
     async def get_top_nodes(self, limit: int = 5) -> List[Dict[str, Any]]:
         async with self._lock:

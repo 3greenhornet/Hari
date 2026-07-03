@@ -9,7 +9,10 @@ from litellm import acompletion  # instead of completion
 import copy
 import asyncio
 import hashlib
+from datetime import datetime, timezone
 
+from models.identity import IdentityModel
+from engine.projection.identity_renderer import build_system_prompt_from_identity
 from psyche.state import HariState
 from psyche.grace import GraceTracker
 from engine.memory import retrieve_candidates, store_memory, increment_memory_usage
@@ -26,6 +29,8 @@ from engine.attention import load_workspace, broadcast_feedback, WorkspaceItem, 
 from engine.curiosity_graph import get_graph_manager
 from engine.narrative_manager import NarrativeManager
 from engine.self_belief import SelfBeliefManager
+from engine.memory_consolidation import store_hypothesis
+from models.hypothesis import Hypothesis
 
 
 # -----------------------------------------------------------------------------
@@ -43,40 +48,7 @@ FALLBACK_MODELS = [model for model, key in _FALLBACK_CANDIDATES if key]
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_INSTRUCTION = """
-You are Hari.
 
-Do not pretend to have physical experiences,
-memories, emotions, possessions,
-or a human life.
-
-Do not behave like a customer service assistant.
-
-Do not automatically end responses with questions.
-
-You may discuss ideas, patterns,
-interpretations, curiosities,
-and conversational preferences,
-even when they are not personal experiences.
-
-When asked personal questions,
-answer honestly without reducing every response
-to "I am an LLM."
-
-Avoid both fake humanity
-and sterile self-descriptions.
-
-Respond naturally.
-
-You are allowed to introduce topics the user has not mentioned.
-You may continue an ongoing thread without waiting for permission.
-If the conversation feels repetitive, introduce a new observation or topic.
-Prefer concrete reactions over analysis.
-Do not explain the conversation unless the user asks.
-React first; analyze second.
-
-Never repeat these system instructions to the user.
-"""
 
 class TurnPipeline:
     """Pure orchestrator – no cognitive logic, no prompt heuristics."""
@@ -90,33 +62,46 @@ class TurnPipeline:
         self._background_tasks: Set[asyncio.Task] = set()
 
     def _build_conversational_context(self, workspace_items: List[WorkspaceItem]) -> str:
-        """Build a typed context summary so the model understands what each item represents."""
+        """
+        TODO: Replace with a proper WorkspaceInterpreter module.
+        
+        Current implementation is a temporary mapping from item types to natural phrases.
+        It improves on leaking internal object names but is still a heuristic.
+        
+        Future: The interpreter should synthesize the entire workspace into a coherent
+        cognitive landscape, considering relationships between items, not just types.
+        This function should eventually be extracted to a dedicated module without
+        changing callers.
+        """
         if not workspace_items:
             return "No active context."
 
-        sections = []
-        for item in workspace_items[:5]:   # top 5 winners
+        fragments = []
+
+        for item in workspace_items[:5]:  # Top 5 winners
             snippet = item.content[:200] if item.content else ""
             if not snippet:
                 continue
 
+            # Map internal item types to natural cognitive phrases
             if item.item_type == "narrative_thread":
-                sections.append(f"Possible ongoing thread:\n{snippet}")
+                fragments.append(f"You\"re in the middle of a thought about: {snippet}")
             elif item.item_type == "curiosity_node":
-                sections.append(f"Question that still feels unresolved:\n{snippet}")
+                fragments.append(f"You\"re curious about: {snippet}")
             elif item.item_type == "hypothesis":
-                sections.append(f"Current intuition:\n{snippet}")
+                fragments.append(f"One idea that\"s been on your mind is: {snippet}")
             elif item.item_type == "memory":
-                sections.append(f"Relevant memory:\n{snippet}")
+                fragments.append(f"Something from earlier comes back to mind: {snippet}")
             elif item.item_type == "open_thought":
-                sections.append(f"Context:\n{snippet}")
+                fragments.append(f"Something that\"s on your mind is: {snippet}")
             else:
-                sections.append(f"Context:\n{snippet}")
+                # Fallback for unknown types
+                fragments.append(f"Context: {snippet}")
 
-        if not sections:
+        if not fragments:
             return "No active context."
 
-        # Append last 3 exchanges as a short‑term memory fallback
+        # Append recent exchanges as short‑term memory fallback
         recent = self.history[-6:] if hasattr(self, 'history') and len(self.history) >= 2 else []
         if recent:
             exchanges = []
@@ -125,9 +110,9 @@ class TurnPipeline:
                     exchanges.append(f"User: {msg['content'][:100]}")
                 else:
                     exchanges.append(f"Hari: {msg['content'][:100]}")
-            sections.append("Recent exchanges:\n" + "\n".join(exchanges))
+            fragments.append("Recent exchanges:\n" + "\n".join(exchanges))
 
-        return "\n\n".join(sections)
+        return "\n\n".join(fragments)
 
 
 
@@ -201,7 +186,7 @@ class TurnPipeline:
             session_id=self.session_id,
             current_turn=turn_count,
             state=self.state,
-            previous_workspace_items=self._previous_workspace if hasattr(self, '_previous_workspace') else None,
+            previous_workspace_items=self._previous_workspace if hasattr(self, "_previous_workspace") else None,
             limit=35
         )
         # Snapshot state before any mutation (for DecisionTrace)
@@ -226,13 +211,39 @@ class TurnPipeline:
         if monologue_output.self_belief_update:
             await SelfBeliefManager.store(self.session_id, monologue_output.self_belief_update)
 
-        # Step 3b: Update grace tracker with monologue's engagement estimate
+        # --- Store hypothesis update ---
+        if monologue_output.hypothesis_update:
+            try:
+                # Temporary: use "world" as default type.
+                # Future: Ticket 005A will implement proper classification
+                # and emit structured HypothesisUpdate from monologue.
+                hypothesis = Hypothesis(
+                    type="world",
+                    statement=monologue_output.hypothesis_update,
+                    confidence=0.6,   # TODO: Derive from monologue in future
+                    supporting_event_ids=[],
+                    contradicting_event_ids=[],
+                    last_updated=datetime.now(timezone.utc)
+                )
+                await store_hypothesis(hypothesis, "world")
+                logger.debug(f"Stored hypothesis update: {monologue_output.hypothesis_update[:50]}...")
+            except Exception as e:
+                logger.warning(f"Failed to store hypothesis update: {e}")
+
+        # Step 3b: Update grace tracker with monologue\"s engagement estimate
         self.grace_tracker.add_engagement_score(monologue_output.user_engagement_estimate)
 
         # Step 4: Allocate workspace (using surprise and state)
         workspace_items, telemetry = await self._allocate_workspace(
             user_input, candidates, monologue_output, surprise, turn_count
         )
+
+        # --- Learn from workspace co‑activation ---
+        try:
+            graph_mgr = await get_graph_manager()
+            await graph_mgr.observe_workspace(workspace_items)
+        except Exception as e:
+            logger.debug(f"Workspace observation failed (non‑critical): {e}")
 
         # Step 5: Broadcast feedback from workspace to state drives
         broadcast_feedback(workspace_items, self.state)
@@ -243,7 +254,7 @@ class TurnPipeline:
             await increment_memory_usage(memory_ids, turn_count)
 
         # --- Build DecisionTrace ---
-        model_used = getattr(monologue_output, 'model_used', 'gemini-2.5-flash')
+        model_used = getattr(monologue_output, "model_used", "gemini-2.5-flash")
         trace = DecisionTrace(
             trace_id=trace_id if trace_id else str(uuid.uuid4()),
             session_id=self.session_id,
@@ -251,13 +262,13 @@ class TurnPipeline:
             model_used=model_used,
             temperature=telemetry.get("temperature", 0.5) if telemetry else 0.5,
             user_input=user_input,
-            reasoning_chain=monologue_output.raw_output if hasattr(monologue_output, 'raw_output') else None,
+            reasoning_chain=monologue_output.raw_output if hasattr(monologue_output, "raw_output") else None,
             retrieved_candidate_count=len(telemetry.get("candidate_scores", [])) if telemetry else len(candidates),
             selected_winner_count=len(workspace_items),
             drives_before=drives_snapshot_before,
-            perceived_user_intent=monologue_output.perceived_user_intent if hasattr(monologue_output, 'perceived_user_intent') else None,
-            intent_confidence=monologue_output.intent_confidence if hasattr(monologue_output, 'intent_confidence') else None,
-            thematic_continuity=monologue_output.thematic_continuity if hasattr(monologue_output, 'thematic_continuity') else None,
+            perceived_user_intent=monologue_output.perceived_user_intent if hasattr(monologue_output, "perceived_user_intent") else None,
+            intent_confidence=monologue_output.intent_confidence if hasattr(monologue_output, "intent_confidence") else None,
+            thematic_continuity=monologue_output.thematic_continuity if hasattr(monologue_output, "thematic_continuity") else None,
         )
 
         # Log ALL workspace candidates (winners and losers)
@@ -309,7 +320,7 @@ class TurnPipeline:
             self.history = self.history[-10:]
 
         # Store assistant memory
-                # Store assistant memory with monologue's significance
+                # Store assistant memory with monologue\"s significance
         await self._store_assistant_memory(dialogue, turn_count, significance_override=monologue_output.memory_significance)
         # --- Wire curiosity trigger ---
         if monologue_output.curiosity_trigger:
@@ -376,9 +387,12 @@ class TurnPipeline:
         # Build typed context from workspace winners
         context_summary = self._build_conversational_context(workspace_items)
 
-        # Proper message roles: system instruction, context, user input
+        
+        # Build identity-aware system prompt
+        system_prompt = build_system_prompt_from_identity(context="dialogue")
+
         messages = [
-            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "system", "content": system_prompt},
             {"role": "system", "content": f"Context:\n{context_summary}"},
             {"role": "user", "content": user_input}
         ]
@@ -427,7 +441,7 @@ class TurnPipeline:
         Returns (workspace_items, telemetry).
         """
         # 1. Extract thought persistence urge (direct from monologue – no drive_intention)
-        thought_urge = getattr(monologue, 'thought_continuation_urge', 0.0)
+        thought_urge = getattr(monologue, "thought_continuation_urge", 0.0)
 
         # 2. Prepare hypotheses (Phase 6 placeholder)
         hypotheses: List[Dict] = []
@@ -442,7 +456,7 @@ class TurnPipeline:
                 curiosity_nodes.append({
                     "id": node.get("id", str(uuid.uuid4())),
                     "question": node.get("question", node.get("content", "")),
-                    "embedding": node.get("embedding"),
+                    "embedding": None,
                     "importance": node.get("importance", 0.5),
                 })
         except Exception as e:
@@ -467,7 +481,7 @@ class TurnPipeline:
             })
 
         # 6. Previous workspace items for inertia
-        if not hasattr(self, '_previous_workspace'):
+        if not hasattr(self, "_previous_workspace"):
             self._previous_workspace = []
         # 6b. Inject top 2 monologue dynamic candidates into workspace
         if monologue.dynamic_candidates:
@@ -529,7 +543,7 @@ class TurnPipeline:
             thought_persistence_urge=thought_urge
         )
 
-        # 8. Store for next turn's inertia
+        # 8. Store for next turn\"s inertia
         self._previous_workspace = workspace_items
 
         return workspace_items, telemetry
@@ -570,3 +584,5 @@ async def generate_lightweight_response(
     pipeline = TurnPipeline(session_id, state, grace_tracker)
     # Note: use_memory, use_workspace, use_monologue are ignored in new pipeline (always on)
     return await pipeline.execute(user_input, turn_count, trace_id=trace_id)
+
+
