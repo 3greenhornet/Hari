@@ -165,20 +165,13 @@ For detailed diagrams and data flow, see ARCHITECTURE.md.
 - ✅ Hypothesis promotion
 - ✅ Background consolidation
 
-### Planned / Not Yet Wired
+### Current Status
 
-- ❌ IdentityModel integration
-- ❌ Persistent self-beliefs
-- ❌ Curiosity graph edges
+All core subsystems are operational. See **[ROADMAP.md](ROADMAP.md)** for the complete status, sprints, and roadmap.
 
 ### Next Priorities
 
-1. Wire the identity model into the dialogue prompt.
-2. Persist self-beliefs and hypothesis updates.
-3. Implement curiosity graph edges.
-4. Tune workspace attention coefficients and prompts.
-
-See **TODO.md** and **ARCHITECTURE.md** for the detailed implementation roadmap.
+See **[ROADMAP.md](ROADMAP.md)** for current priorities and sprint details.
 
 🧪 Testing
 bash

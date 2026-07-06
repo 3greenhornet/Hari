@@ -4,8 +4,8 @@ import uuid
 import json
 import logging
 from typing import List, Dict, Any, Optional
-import litellm
-from litellm import acompletion  # instead of completion
+import litellm  # noqa
+from litellm import acompletion
 import copy
 import asyncio
 import hashlib
@@ -31,6 +31,7 @@ from engine.narrative_manager import NarrativeManager
 from engine.self_belief import SelfBeliefManager
 from engine.memory_consolidation import store_hypothesis
 from models.hypothesis import Hypothesis
+from engine.events import EventLogger
 
 
 # -----------------------------------------------------------------------------
@@ -60,6 +61,8 @@ class TurnPipeline:
         self.history: List[Dict[str, str]] = []  # simple turn history
         self._last_assistant_response = ""
         self._background_tasks: Set[asyncio.Task] = set()
+        self._event_logger = EventLogger(session_id)
+        self._event_logger.log_session_start()
 
     def _build_conversational_context(self, workspace_items: List[WorkspaceItem]) -> str:
         """
@@ -102,7 +105,7 @@ class TurnPipeline:
             return "No active context."
 
         # Append recent exchanges as short‑term memory fallback
-        recent = self.history[-6:] if hasattr(self, 'history') and len(self.history) >= 2 else []
+        recent = self.history[-6:] if hasattr(self, "history") and len(self.history) >= 2 else []
         if recent:
             exchanges = []
             for msg in recent:
@@ -179,6 +182,7 @@ class TurnPipeline:
     async def execute(self, user_input: str, turn_count: int, trace_id: Optional[str] = None) -> Dict[str, Any]:
         # Step 1: Compute prediction error from last response vs current input
         surprise = await compute_prediction_error(self._last_assistant_response, user_input)
+        self._event_logger.log_user_input(user_input)
 
         # Step 2: Retrieve memory candidates using hybrid, diversified retrieval
         candidates = await load_workspace_secured(
@@ -188,6 +192,10 @@ class TurnPipeline:
             state=self.state,
             previous_workspace_items=self._previous_workspace if hasattr(self, "_previous_workspace") else None,
             limit=35
+        )
+        self._event_logger.log_memory_retrieval(
+            query=user_input,
+            count=len(candidates)
         )
         # Snapshot state before any mutation (for DecisionTrace)
         drives_snapshot_before = {
@@ -201,12 +209,14 @@ class TurnPipeline:
             "arousal": self.state.arousal,
             "dominance": self.state.dominance,
         }
+        self._event_logger.log_state_snapshot(self.state)
 
         # Step 3: Run monologue (sensory perception) – pass surprise as prediction_error
         monologue_output = await run_monologue(
             user_input, self.state, candidates, prediction_error=surprise
         )
         logger.info(f"MONOLOGUE_RAW: {monologue_output.model_dump_json(indent=2)}")
+        self._event_logger.log_monologue_output(monologue_output)
 
         if monologue_output.self_belief_update:
             await SelfBeliefManager.store(self.session_id, monologue_output.self_belief_update)
@@ -237,6 +247,17 @@ class TurnPipeline:
         workspace_items, telemetry = await self._allocate_workspace(
             user_input, candidates, monologue_output, surprise, turn_count
         )
+        workspace_summary = []
+        for item in workspace_items[:5]:
+            workspace_summary.append({
+                "type": getattr(item, "item_type", "unknown"),
+                "content": getattr(item, "content", "")[:100]
+            })
+        self._event_logger.log_workspace_load(
+            candidate_count=len(telemetry.get("candidate_scores", [])),
+            winner_count=len(workspace_items),
+            winners=[f"{item.item_type}: {item.content[:50]}" for item in workspace_items[:5]]
+        )
 
         # --- Learn from workspace co‑activation ---
         try:
@@ -263,7 +284,7 @@ class TurnPipeline:
             temperature=telemetry.get("temperature", 0.5) if telemetry else 0.5,
             user_input=user_input,
             reasoning_chain=monologue_output.raw_output if hasattr(monologue_output, "raw_output") else None,
-            retrieved_candidate_count=len(telemetry.get("candidate_scores", [])) if telemetry else len(candidates),
+            retrieved_candidate_count=len(telemetry.get("candidate_scores", [])),
             selected_winner_count=len(workspace_items),
             drives_before=drives_snapshot_before,
             perceived_user_intent=monologue_output.perceived_user_intent if hasattr(monologue_output, "perceived_user_intent") else None,
@@ -294,6 +315,7 @@ class TurnPipeline:
         # Step 7: Generate dialogue response from workspace
 
         dialogue = await self._generate_dialogue(workspace_items, user_input, turn_count, surprise, trace_id)
+        self._event_logger.log_assistant_response(dialogue, workspace_summary)
         
         # Finalize DecisionTrace
         trace.generated_response = dialogue
@@ -311,6 +333,7 @@ class TurnPipeline:
 
         # Schedule background write
         self._run_background_log(self._store_decision_trace(trace))
+        self._event_logger.log_decision_trace(trace_id)
 
 
         # Update history and memory

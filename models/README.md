@@ -374,21 +374,7 @@ When adding new fields, ensure:
 
 ## Status
 
-| Model | Purpose | Wired? |
-|-------|---------|--------|
-| `MemoryEvent` | Conversation turn | ✅ Yes |
-| `MonologueOutput` | Sensory perception | ✅ Yes |
-| `DecisionTrace` | Audit trail | ✅ Yes |
-| `IdentityModel` | Identity layers | ❌ Not wired (Ticket 008) |
-| `RelationshipModel` | Per‑user state | ❌ Not wired |
-| `NarrativeThread` | Persistent narratives | ✅ Yes |
-| `CuriosityNode` | Open questions | ✅ Yes |
-| `Hypothesis` | Beliefs | ✅ Yes (promotion) |
-| `DevelopmentEvent` | Landmarks | ❌ Not wired |
-| `Interest` | Long‑term gravity | ❌ Not wired |
-| `Contradiction` | Cognitive tension | ❌ Not wired |
-| `Volition` models | Desires/Agendas | ❌ Not wired |
-| `Thought` | Incomplete reasoning | ❌ Not wired |
+See **[ROADMAP.md](../ROADMAP.md)** for the complete roadmap and ticket status.
 
 ---
 

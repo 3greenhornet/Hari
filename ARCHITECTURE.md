@@ -739,87 +739,39 @@ Workspace ───► Prediction (Workspace cannot trigger prediction)
 
 ## 🔍 Current Codebase Reality
 
-### What Exists and Works
+## 4. Current Status & Roadmap
 
-| System | Status |
-|--------|--------|
-| Database & Schema | ✅ Complete |
-| Memory Storage & Retrieval | ✅ Working (hybrid retrieval) |
-| Workspace Competition | ✅ Working (pressure fields, softmax) |
-| Monologue Pipeline | ✅ Working (Groq fallback) |
-| Dialogue Generation | ✅ Working (LiteLLM cascade) |
-| DecisionTrace | ✅ Working (full audit trail) |
-| Curiosity Graph (nodes) | ✅ Wired (nodes with session isolation) |
-| Narrative Threads | ✅ Wired |
-| Memory Significance | ✅ Wired (0.4–0.92 variation) |
-| Hypotheses | ✅ Working (5 promoted) |
-| Consolidation | ✅ Working (background worker) |
-| Health Dashboard | ✅ Working |
+All status information, sprints, tickets, and success metrics are maintained in **[ROADMAP.md](ROADMAP.md)**. That is the single source of truth.
 
-### What Exists But Is Not Wired
+### Quick Status Summary
 
-| Component | Gap |
-|-----------|-----|
-| IdentityModel | Not wired into system prompt |
-| OriginModel | Not wired into system prompt |
-| Self‑belief persistence | Monologue `self_belief_update` is discarded |
-| Hypothesis update persistence | Monologue `hypothesis_update` is discarded |
-| RelationshipModel | Never instantiated or loaded |
-| Contradiction | No lifecycle; never detected or stored |
-| Interest | Never formed from curiosity nodes |
-| Volition | Never used |
-| Social Cognition | Stub; never called |
+| Sprint | Focus | Status |
+|:-------|:------|:-------|
+| 2.1A | Repository Recovery | ✅ Done |
+| 2.1B | Architectural Wiring | ✅ Done |
+| 2.1C | Behaviour Calibration | ⏳ In Progress |
+| 2.1D | Social Cognition | ⏳ Planned |
+| 3 | Ecology Pipeline | ⏳ Planned |
 
-### What Is Broken (Runtime Bugs)
-
-| Bug | File | Status |
-|-----|------|--------|
-| `_summarize_sparse_content()` calls undefined `ensure_genai_available()` | `memory_consolidation.py` | ✅ Fixed (Ticket 001) |
-| `consolidation_worker.py` calls undefined `decay_graph_nodes` | `consolidation_worker.py` | ✅ Fixed (Ticket 002) |
-| `app.py` calls undefined `generate_hari_response` | `engine/__init__.py` | ✅ Fixed (Ticket 003) |
+See **[ROADMAP.md](ROADMAP.md)** for detailed ticket status, success metrics, and architectural debt.
 
 ---
 
 ## 🚀 Implementation Plan
 
-### Sprint 2.1A – Repository Recovery (Runtime Stabilisation) – ✅ Done
+All implementation tickets, sprints, and priorities are maintained in **[ROADMAP.md](ROADMAP.md)**. That is the single source of truth for the roadmap.
 
-- ✅ **Ticket 001** – Fix `memory_consolidation.py` LiteLLM fallback
-- ✅ **Ticket 002** – Fix `consolidation_worker.py` decay bug
-- ✅ **Ticket 003** – Restore Streamlit wrapper (`generate_hari_response`)
+### Sprint Summary
 
-### Sprint 2.1B – Architectural Wiring (Persistence & Graph Edges)
+| Sprint | Focus | Status |
+|:-------|:------|:-------|
+| 2.1A | Repository Recovery (runtime bugs) | ✅ Done |
+| 2.1B | Architectural Wiring (persistence, edges, identity) | ✅ Done |
+| 2.1C | Behaviour Calibration (tuning, no hacks) | ⏳ In Progress |
+| 2.1D | Social Cognition | ⏳ Planned |
+| 3 | Ecology Pipeline (contradictions, interests, identity) | ⏳ Planned |
 
-- 🔄 **Ticket 004** – Persist self‑belief updates (new table + manager) — *High Priority*
-- 🔄 **Ticket 005** – Wire hypothesis updates (use existing `store_hypothesis`) — *High Priority*
-- 🔄 **Ticket 006** – Implement curiosity edges (`observe_coactivation`) — *High Priority*
-- 🔄 **Ticket 007** – Refactor `_build_conversational_context()` — *Medium Priority*
-- 🔄 **Ticket 008** – Wire `IdentityModel` into system prompt — *High Priority*
-
-### Sprint 2.1C – Behaviour Calibration (Tuning, Not Hacks)
-
-- 🔄 **Ticket 009** – Tune system prompt to enforce neutral, reciprocal, non‑assistant stance — *High Priority*
-- 🔄 **Ticket 010** – Calibrate attention coefficients (weights in `compute_total_salience`) — *Medium Priority*
-- 🔄 **Ticket 011** – Add `exploratory_potential` to salience formula — *Medium Priority*
-- 🔄 **Ticket 012** – Add `shared_significance` to salience formula — *Low Priority*
-- 🔄 **Ticket 013** – Tune `broadcast_feedback` coefficients — *Medium Priority*
-
-> [!NOTE]
-> **Dynamic candidate urgency** will be calibrated via attention coefficients (Ticket 010) and salience formula adjustments (Ticket 011). Hardcoded urgency multipliers (e.g., `urgency *= 1.5`) are explicitly rejected as heuristics that bypass the workspace competition.
-
-### Sprint 2.1D – Social Cognition & Interpretation (Future)
-
-- 🔄 **Ticket 014** – Extend monologue to output avoidance pattern detection — *Medium Priority*
-- 🔄 **Ticket 015** – Wire social interpretation into state updates — *Medium Priority*
-- 🔄 **Ticket 016** – Implement relationship model loading/updating — *Low Priority*
-
-### Sprint 3 – Contradiction, Interest, and Identity Evolution (Future)
-
-- 🔄 **Ticket 017** – Implement contradiction detection (memory vs hypothesis) — *High Priority*
-- 🔄 **Ticket 018** – Implement interest formation (curiosity → interest promotion) — *High Priority*
-- 🔄 **Ticket 019** – Implement identity evolution (interests → identity anchors) — *Medium Priority*
-- 🔄 **Ticket 020** – Implement volition engine (desires → agendas) — *Low Priority*
-
+See **[ROADMAP.md](ROADMAP.md)** for individual tickets, priorities, and statuses.
 ---
 
 ## 🗺️ Future Architecture Roadmap

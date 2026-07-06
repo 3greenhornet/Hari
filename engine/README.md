@@ -274,10 +274,10 @@ Testing
 bash
 pytest tests/test_engine.py
 Next Steps (Wiring Missing)
-File	Missing Functionality	Ticket
-generate.py	Persist self_belief_update	004
-generate.py	Persist hypothesis_update	005
-curiosity_graph.py	Call update_edge() (curiosity edges)	006
-generate.py	Wire IdentityModel into system prompt	008
-generate.py	Refactor _build_conversational_context()	007
+
+
+## Current Status
+
+All core engine components are wired. See **[ROADMAP.md](../ROADMAP.md)** for the complete status of all tickets.
+
 The engine is where Hari's cognition happens. Each file has a single, clear responsibility. Modifications must preserve the architectural principles – workspace as sole gateway, no hardcoded heuristics, observability first.
