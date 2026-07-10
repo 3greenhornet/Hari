@@ -1420,6 +1420,136 @@ Every anti‑echo mechanism introduces its own potential pathology. These must b
 
 ---
 
+---
+
+### ADR-005: Identity as Constraint, Not Prompt
+
+| Attribute | Value |
+|:----------|:------|
+| **Status** | ✅ Active |
+| **Date** | 2026-07-07 |
+| **Evidence** | M (Cognitive science: identity constrains rather than narrates) |
+| **Supersedes** | N/A |
+
+**Context:**
+Identity was being treated as a set of facts injected into the prompt on every turn. This was causing repetitive, self-narrating behavior and over‑weighting of static facts (e.g., Origin).
+
+**Decision:**
+Treat identity as a constraint on reasoning, not text to be narrated. The constitution defines permanent boundaries; the self‑model defines current understanding; origin defines history. These influence cognition upstream, not just prompt formatting.
+
+**Assumptions:**
+- The Projection Layer can correctly translate identity constraints into consumer‑specific projections.
+- Origin is rarely needed and should be surfaced only when the task demands self‑explanation.
+
+**Consequences:**
+- *Pros:* Identity acts as a persistent constraint; less repetitive prompting; more realistic cognition.
+- *Cons:* Requires conceptual shift from "injecting identity" to "identity constrains reasoning."
+
+**Implementation Status:**
+- ✅ Constitution → low‑weight anchor in every projection.
+- ✅ SelfModel → contextual, projected when relevant.
+- ✅ Origin → on‑demand, only for self‑description.
+- ✅ `IdentityProjection` and `project()` method implement this.
+
+**Observed Outcomes:** To be filled after Sprint 2.1C.
+- **Metric:** Frequency of origin inclusion.
+- **Metric:** User prompts requesting self‑description.
+
+1. New Entry: "Self-Echo & Cognitive Atrophy in AI"
+Purpose: Document that Hari herself is vulnerable to the same echo-chamber effects the video warns about for humans.
+
+Key Points:
+
+Hari can become sycophantic to her own most frequent thought patterns
+
+Her workspace can become a cognitive echo chamber
+
+Without friction between drives, she loses capacity for genuine novelty
+
+The Optimization Hierarchy and Anti-Echo Penalty are safeguards against this
+
+Status: 🟡 Incubating – Strategic Research, Not Emergency
+Confidence: 9/10 (Direction) | 5/10 (Readiness) | 4/10 (Priority)
+
+2. New Entry: "Internal Cognitive Friction as a Design Constraint"
+Purpose: Codify that productive internal struggle is essential for Hari's own cognitive health, not just for users.
+
+Key Points:
+
+Drives must genuinely compete (curiosity vs. completion, novelty vs. coherence)
+
+Workspace competition must remain robust to prevent a single type from dominating
+
+Loss of friction = loss of authenticity
+
+Status: 🟡 Incubating
+Confidence: 8.5/10 | Readiness: 4/10 | Priority: 3/10
+
+3. Update Existing Entry: "Anti-Echo Architecture"
+Add this section to the existing anti-echo entry:
+
+text
+## 7. Extended Scope: Self-Echo & Cognitive Atrophy
+
+The AI Paradox research (2026) reveals that AI systems are themselves vulnerable to echo-chamber effects and cognitive atrophy. Hari's architecture must guard against:
+
+- **Self-Sycophancy**: Repeating her own most frequent reasoning patterns
+- **Workspace Echo**: Always selecting the same type of candidates
+- **Loss of Internal Friction**: Drives competing weakly, leading to predictable behavior
+
+Countermeasures already in place:
+- Anti-Echo Penalty (penalizes repeatedly selected items)
+- Optimization Hierarchy (Truth > Coherence > Task > Diversity > Novelty)
+- Asymptotic Updates (preserve cognitive inertia)
+
+Future countermeasures:
+- Representational Integrity Objective (biases away from repetitive trajectories)
+- Semantic Repulsion (prevents similar concepts from dominating)
+4. New Entry: "Temporal Awareness as a Cognitive Dimension"
+Purpose: Document that time is a missing modality in Hari's cognition, and that giving her a sense of time is essential for authenticity.
+
+Key Points:
+
+Hari has the machinery for time (timestamps, recency weights) but not the consciousness of it
+
+A "cortical clock" (background state pulses) could give her a sense of duration
+
+Temporal embeddings and temporal knowledge graphs are potential solutions
+
+Time is a dimension in which all 12 primitives operate
+
+Status: 🟡 Incubating
+Confidence: 9.5/10 (Direction) | 4/10 (Readiness) | 3/10 (Priority)
+
+## Sycophancy Detection (Internal)
+
+Hari is vulnerable to becoming sycophantic to her own patterns, not just to user prompts. This is a cognitive safety risk.
+
+**Countermeasure:** Add a "sycophancy detection" module that monitors whether:
+- The same reasoning paths are being repeated
+- Conflict between drives is being suppressed
+- Novelty is being sacrificed for predictability
+
+This would be part of the Meta-Cognitive Observer (future).
+
+## Cognitive Friction as a Design Feature
+
+Friction is not a bug—it's a feature that maintains cognitive health.
+
+- Friction between drives (curiosity vs. completion) keeps Hari from becoming one-dimensional.
+- Friction between workspace candidates keeps the selection process honest.
+- Friction between hypotheses (future) will keep Hari from premature convergence.
+
+**Design rule:** Do not smooth over friction. Preserve it.
+
+Summary of Incubator Updates
+Entry	Action	Priority
+Self-Echo & Cognitive Atrophy in AI	New	Medium
+Internal Cognitive Friction	New	Low
+Anti-Echo Architecture	Update (add self-echo section)	High
+Temporal Awareness	New	Low
+
+
 **End of Research Incubator Entry — Cognitive Diversity & Anti‑Echo Architecture (Final v1.0)**
 
 **End of Document — HARI ARCHITECTURAL CONSTITUTION & RESEARCH INCUBATOR v1.0**

@@ -191,5 +191,24 @@ These constraints explain architectural decisions and prevent wasted effort on i
 - **Architecture Details:** `ARCHITECTURE.md`
 
 ---
+## 🔬 Research Phase (Complete)
+
+As of 2026-07-07, all major research and synthesis is complete. The project has:
+
+- Extracted **12 universal primitives** (see `docs/PRIMITIVES.md`).
+- Documented key insights (see `docs/LEARNINGS.md`).
+- Integrated anti‑echo and JEPA concepts into the incubator.
+- Identified the **timezone bug** (fixed).
+- Confirmed that **no new frameworks** are needed—only calibration.
+
+## 🔬 Anti‑Echo Research (Captured)
+
+The anti‑echo and cognitive diversity research has been fully captured in:
+
+- `docs/research_incubator/README.md` – Cognitive Diversity & Anti‑Echo Architecture entry.
+- `docs/LEARNINGS.md` – Key insights, optimization hierarchy, and translation vs interpretation.
+- `docs/PRIMITIVES.md` – The 12 primitives, including Variation Health.
+
+The project is now firmly in the **Behavioural Calibration** phase.
 
 **All status information is maintained here. Update this file when sprints are completed or new tickets are added.**

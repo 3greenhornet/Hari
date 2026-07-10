@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Literal
 import re
 
@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from db.connection import get_pool
 from models.memory_event import MemoryEvent
 from models.hypothesis import Hypothesis
+from datetime import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,7 @@ Example:
                 confidence=confidence,
                 supporting_event_ids=[memory.id] if memory.id else [],
                 contradicting_event_ids=[],
-                last_updated=datetime.utcnow()
+                last_updated=datetime.now(timezone.utc)
             )
             # No need for _extracted_type; it\'s already in hypothesis.type
 
@@ -300,7 +301,7 @@ async def archive_old_memories(session_id: str, older_than_days: int = ARCHIVE_O
     if not pool:
         return 0
 
-    cutoff_date = datetime.utcnow() - timedelta(days=older_than_days)
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=older_than_days)
 
     async with pool.acquire() as conn:
         old_memories = await conn.fetch("""
@@ -329,7 +330,7 @@ async def archive_old_memories(session_id: str, older_than_days: int = ARCHIVE_O
             await conn.execute("""
                 INSERT INTO archived_memories (id, original_id, session_id, compressed_content, original_significance, archived_at)
                 VALUES ($1, $2, $3, $4, $5, $6)
-            """, f"arch_{mem['id']}", mem["id"], session_id, compressed, mem["significance"], datetime.utcnow())
+            """, f"arch_{mem['id']}", mem["id"], session_id, compressed, mem["significance"], datetime.now(timezone.utc))
 
             await conn.execute("DELETE FROM memories WHERE id = $1", mem["id"])
             archived_count += 1

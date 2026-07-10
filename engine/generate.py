@@ -32,6 +32,8 @@ from engine.self_belief import SelfBeliefManager
 from engine.memory_consolidation import store_hypothesis
 from models.hypothesis import Hypothesis
 from engine.events import EventLogger
+from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibration
+from engine.attention_instrumentation import AttentionInstrumentation
 
 
 # -----------------------------------------------------------------------------
@@ -63,6 +65,10 @@ class TurnPipeline:
         self._background_tasks: Set[asyncio.Task] = set()
         self._event_logger = EventLogger(session_id)
         self._event_logger.log_session_start()
+        self.attention_config = AttentionCalibration.from_env()
+        self.attention_instrumentation = AttentionInstrumentation(self.attention_config)
+
+        
 
     def _build_conversational_context(self, workspace_items: List[WorkspaceItem]) -> str:
         """
@@ -564,12 +570,18 @@ class TurnPipeline:
             workspace_size=workspace_size,
             previous_workspace_items=self._previous_workspace,
             thought_persistence_urge=thought_urge
+            instrumentation=self.attention_instrumentation
         )
 
         # 8. Store for next turn\"s inertia
         self._previous_workspace = workspace_items
 
         return workspace_items, telemetry
+    
+    def shutdown(self):
+        """Clean up resources: flush attention logs and log session end."""
+        self.attention_instrumentation.close()
+        self._event_logger.log_session_end()
 
     async def _store_assistant_memory(self, dialogue: str, turn_count: int, significance_override: Optional[float] = None):
         if dialogue == "...":

@@ -35,6 +35,8 @@ from models.memory_event import MemoryEvent
 from psyche.state import HariState
 from engine.memory import increment_memory_usage
 from datetime import datetime
+from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibration
+from engine.attention_instrumentation import AttentionInstrumentation
 
 logger = logging.getLogger(__name__)
 
@@ -156,59 +158,77 @@ async def _compute_pressure_field(
 
     return pressures
 
-
 async def compute_total_salience(
     pressures: Dict[str, Any],
     state: HariState,
+    config: AttentionCalibration = DEFAULT_ATTENTION_CONFIG,
+    instrumentation: Optional[AttentionInstrumentation] = None,
+    candidate_id: Optional[str] = None,
+    candidate_type: Optional[str] = None,
+    turn_number: Optional[int] = None,
+    previous_engagement: Optional[float] = None,
 ) -> float:
     """
     Blends cognitive pressures with core state drives.
     Guarantees a clean, scalar float output between 0.0 and 1.0.
+    
+    Now uses configurable weights from AttentionCalibration.
+    All new parameters have defaults, preserving backward compatibility.
     """
-    weights = {
-        "relevance": 1.0,
-        "novelty": float(state.curiosity),
-        "curiosity": float(state.curiosity),
-        "completion": float(state.completion),
-    }
-
+    # Get normalized weights from config
+    weights = config.get_weights(state, previous_engagement)
+    
     weighted_sum = 0.0
-    total_weight = 0.0
-
+    total_weight = sum(weights.values())
+    
+    # Track contributions for instrumentation
+    contributions = {}
+    
     for name, raw_pressure in pressures.items():
         w = weights.get(name, 0.0)
         if w == 0.0:
             continue
-
+        
         # Safely convert the pressure to a float scalar
         try:
             if isinstance(raw_pressure, np.ndarray):
                 p = float(raw_pressure.item())
-                logger.warning(
-                    f"Extracted scalar {p} from NumPy array in pressure '{name}'. "
-                    "This indicates a data type issue upstream."
-                )
             else:
                 p = float(raw_pressure)
         except (TypeError, ValueError) as cast_err:
-            logger.error(
-                f"Failed to convert pressure '{name}' value {raw_pressure} to float: {cast_err}"
-            )
+            logger.error(f"Failed to convert pressure '{name}' value {raw_pressure} to float: {cast_err}")
             continue
-
-        weighted_sum += p * w
-        total_weight += w
-
+        
+        contribution = p * w
+        weighted_sum += contribution
+        contributions[name] = contribution
+    
+    # Calculate normalized score
     if total_weight > 0.0:
         salience = weighted_sum / total_weight
     else:
         salience = 0.5
-
+    
+    # Clamp
+    salience = max(0.0, min(1.0, salience))
+    
+    # Log pressure contributions for calibration (if instrumentation provided)
+    if instrumentation and candidate_id and turn_number is not None:
+        instrumentation.record_pressure(
+            turn_number=turn_number,
+            candidate_id=candidate_id,
+            candidate_type=candidate_type or "unknown",
+            pressures=pressures,
+            weights=weights,
+            raw_score=weighted_sum,
+            final_score=salience,
+            was_selected=False  # Will be updated after selection
+        )
+    
     if isinstance(salience, np.ndarray):
         salience = float(salience.item())
-
+    
     return max(0.0, min(1.0, salience))
-
 
     # Legacy alias for engine/__init__.py (avoids refactoring downstream)
 async def compute_salience(pressures: Dict[str, float], state: HariState) -> float:
@@ -277,7 +297,8 @@ async def load_workspace(
     current_turn: int,
     workspace_size: int = 5,
     previous_workspace_items: Optional[List[WorkspaceItem]] = None,
-    thought_persistence_urge: float = 0.0, 
+    thought_persistence_urge: float = 0.0,
+    instrumentation: Optional[AttentionInstrumentation] = None,   # NEW
 ) -> Tuple[List[WorkspaceItem], Dict[str, Any]]:
     """
     Loads the cognitive workspace using pressure fields + softmax competition.
@@ -371,8 +392,6 @@ async def load_workspace(
         return [], {"no_candidates": True}
 
     # Compute pressures and total salience for each candidate
-    # Compute pressures and total salience for each candidate
-    # Compute pressures and total salience for each candidate
     enriched_candidates = []
     for _, item_type, source_id, payload, _ in candidates:
         pressures = await _compute_pressure_field(payload, state, user_embedding, prediction_error)
@@ -384,8 +403,17 @@ async def load_workspace(
                     pressures["relevance"] = (pressures["relevance"] + old.metrics.activation) / 2
                     break
         
-        # Base salience from pressures
-        base_salience = await compute_total_salience(pressures, state)
+        # Base salience from pressures (NOW with instrumentation and all parameters)
+        total_salience = await compute_total_salience(
+            pressures, 
+            state,
+            config=DEFAULT_ATTENTION_CONFIG,
+            instrumentation=instrumentation,
+            candidate_id=source_id,
+            candidate_type=item_type,
+            turn_number=current_turn,
+            previous_engagement=state.engagement
+        )
         
         # Memory fatigue and explanatory power
         usage_count = payload.get("usage_count", 0)
@@ -397,7 +425,7 @@ async def load_workspace(
         pressures["fatigue_penalty"] = fatigue_penalty
         
         # Final salience
-        total_salience = base_salience + surprise_contribution - fatigue_penalty
+        total_salience = total_salience + surprise_contribution - fatigue_penalty
         total_salience = max(0.0, total_salience)
         
         # Boost for open_thought
@@ -471,7 +499,13 @@ async def load_workspace(
     if memory_ids:
         await increment_memory_usage(memory_ids, current_turn)
 
+    # --- Mark selections in instrumentation (NEW) ---
+    if instrumentation:
+        selected_ids = [item.source for item in workspace_items]
+        instrumentation.mark_selected(selected_ids)
+
     return workspace_items, telemetry
+
 
 # -----------------------------------------------------------------------------
 # Helper to offload CPU‑bound ops to a thread pool
