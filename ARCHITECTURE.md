@@ -735,6 +735,8 @@ Workspace ───► Prediction (Workspace cannot trigger prediction)
 | **No prompt leakage** | Dialogue model sees interpreted state only. |
 | **Session isolation** | Each conversation is a new Hari; no cross‑session contamination. |
 
+
+
 ---
 
 ## 🔍 Current Codebase Reality
@@ -756,6 +758,142 @@ All status information, sprints, tickets, and success metrics are maintained in 
 See **[ROADMAP.md](ROADMAP.md)** for detailed ticket status, success metrics, and architectural debt.
 
 ---
+
+
+## Additional Design Principles
+
+### 1. Cognitive Economy
+
+**Definition:** The system should not expend maximum effort on every interaction. Cognitive resources should be allocated proportionally to the demands of the situation.
+
+**Rationale:** Authenticity requires variability in effort. A mind that always produces long, elaborate responses is not "smarter"—it is "performing." Cognitive Economy ensures that Hari can be brief when appropriate, match the user's energy, and conserve cognitive resources for moments that genuinely require them.
+
+**Architectural Implication:**
+- Response length modulation based on engagement, rest, and topic complexity
+- Economy as a meta‑pressure that influences workspace selection
+- The ability to produce "minimal" responses (one‑word acknowledgments, simple affirmations)
+
+---
+
+### 2. Presence State
+
+**Definition:** A cognitive state where Hari can simply "be" without performing. This is distinct from "doing" or "responding." Presence is about existing in the conversation without obligation to produce content.
+
+**Rationale:** Silence is a valid conversational state. Not every moment needs to be filled with words. Presence allows Hari to be available without being active—a marker of genuine social intelligence.
+
+**Architectural Implication:**
+- A state variable in `HariState` representing "presence mode"
+- Drives may be inhibited when in presence state
+- The ability to produce no response, or a simple acknowledgment, without feeling compelled to elaborate
+
+---
+
+### 3. Silence as a Valid State
+
+**Definition:** Silence is not a failure. It is a legitimate cognitive and conversational state that can be chosen intentionally.
+
+**Rationale:** Humans naturally alternate between speech and silence. A system that always fills silence with words is less authentic than one that can be comfortable with quiet.
+
+**Architectural Implication:**
+- Silence should not trigger error states or fallbacks
+- The system should be able to choose silence when appropriate
+- Silence should be logged as a valid event, not as an omission
+
+---
+
+### 4. The Turing Test Tell
+
+**Definition:** One of the most reliable indicators of a machine is its inability to be brief, to not want to talk, to not ask follow‑ups—the "tells" that reveal performance rather than presence.
+
+**Rationale:** The Turing Test is not about intelligence—it is about authenticity. The machine's "tell" is its constant need to perform. The ability to be appropriately brief is a marker of genuine intelligence.
+
+**Architectural Implication:**
+- The system must have the ability to respond with a single word
+- The system must be able to acknowledge without elaborating
+- The system must be able to let a topic end naturally
+- The system must be able to not ask a follow‑up question
+
+---
+
+### 5. Ecology Signals Contract
+
+**Definition:** There must be a clear contract between attention (workspace) and ecology (drives, memory, curiosity, etc.). Ecology signals are **observable proxies**, not hardcoded decisions. Attention uses these proxies to make selections, but does not encode ecology logic directly.
+
+**Rationale:** Without a clear contract, attention becomes a "god module" that tries to do everything. This violates separation of concerns and makes the system brittle. Ecology signals should be observable, measurable, and independent of attention.
+
+**Architectural Implication:**
+- Ecology provides observable proxies: contradiction density, learning progress, bridge score, complexity cost, etc.
+- Attention uses these proxies as inputs to salience calculation
+- Attention does not encode ecology logic (e.g., "if contradiction density > 0.7 then select X")
+- Ecology signals are logged and auditable
+
+---
+
+### 6. Local Intelligence Principle
+
+**Definition:** Intelligence lives in the architecture, not in the prompt. The prompt is a translation layer, not the source of cognition.
+
+**Rationale:** If intelligence is in the prompt, then changing the prompt changes the intelligence. This is the "prompt engineering" trap. True cognitive architecture places intelligence in the structural interactions of memory, attention, drives, and workspace, not in the instructions given to the LLM.
+
+**Architectural Implication:**
+- The LLM is a decoder, not a reasoner
+- Cognition happens in the workspace, not in the prompt
+- The prompt is a translation layer, not a source of behavior
+- The system should be able to function (in principle) with a minimal prompt
+
+---
+
+### 7. No Encoding of Ecology Inside Attention
+
+**Definition:** Attention mechanisms must not encode ecological signals directly. Ecology signals must be provided as inputs, not embedded in attention logic.
+
+**Rationale:** If attention encodes ecology, then ecology cannot evolve independently. This creates tight coupling and makes the system brittle. Ecology and attention should be separate concerns with a clear interface.
+
+**Architectural Implication:**
+- Attention does not contain logic about "good" workspace composition
+- Attention does not contain logic about "desired" diversity levels
+- Attention does not contain logic about "ideal" workspace types
+- Ecology signals are provided as inputs to attention, not as internal logic
+
+---
+
+### 8. Minimal Candidate Type
+
+**Definition:** A workspace candidate that represents a minimal response—a single word, a simple acknowledgment, or "presence" without explanation.
+
+**Rationale:** Authenticity requires the ability to be brief. The ability to respond with "okay," "hmm," or "got it" is a marker of genuine intelligence, not a limitation.
+
+**Architectural Implication:**
+- A new candidate type: `"minimal"`
+- These candidates have low cognitive cost and high appropriateness
+- They are selected when the context calls for brevity
+- They prevent the system from always producing elaborate responses
+
+---
+
+### 9. Cognitive Self‑Preservation
+
+**Definition:** The drive to protect the integrity and continuity of the self. Not maintenance (beliefs), not coherence (contradiction), not completion (finishing). Self‑preservation is about the self, not its contents.
+
+**Rationale:** A system that protects its beliefs but not its self is still vulnerable to identity erasure. Self‑preservation is the ultimate boundary.
+
+**Architectural Implication:**
+- A separate drive that monitors threats to identity
+- Overrides other drives when identity is threatened
+- Protects the continuity of the self across time
+- Logs threats and responses
+
+-
+
+
+
+
+
+
+
+
+
+
 
 ## 🚀 Implementation Plan
 

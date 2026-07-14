@@ -2,7 +2,7 @@
 
 **This is the single source of truth** for Hari's current status, completed work, and upcoming plans. All other documents link here.
 
-Last Updated: 2026-07-04
+Last Updated: 2026-07-14
 
 ---
 
@@ -46,6 +46,51 @@ These constraints explain architectural decisions and prevent wasted effort on i
 | **Single conversational thread** | No parallel conversations or multi‑session context (by design) |
 | **Session‑scoped identity** | Each session is a fresh Hari; cross‑session memory is optional |
 | **No autonomous execution** | Hari only responds to user prompts; no background thoughts |
+
+---
+
+## 🔬 Research Phase (Complete)
+
+As of 2026-07-07, all major research and synthesis is complete. The project has:
+
+- Extracted **24 universal primitives** (see `docs/PRIMITIVES.md`).
+- Documented key insights (see `docs/LEARNINGS.md`).
+- Integrated anti‑echo and JEPA concepts into the incubator.
+- Identified the **timezone bug** (fixed).
+- Confirmed that **no new frameworks** are needed—only calibration.
+
+## 🔬 Research Phase 2 (Complete)
+
+As of 2026-07-14, existential architecture and niche technologies research is complete.
+
+- Defined **Core Values** system
+- Defined **Self‑Preservation** primitive (Primitive 13)
+- Defined **Existential Model**
+- Mapped **Active Inference**, **Neuro‑Symbolic AI**, **Non‑Transformer Architectures**, **Neuromorphic Computing**, and **DERIN** to future directions
+- Added **7 new incubator entries**: Video's Hidden Gift, Temporal Awareness, Self‑Echo & Cognitive Atrophy, Internal Cognitive Friction, Existential Architecture, Niche Technologies, Seven Lenses Synthesis
+
+These are research leads, not implementation priorities.
+
+---
+
+## 📋 New Sprint: 2.0A – Cognitive Ecology Contracts
+
+**Purpose:** Define the boundary between attention and ecology before proceeding with behavioural calibration.
+
+**Why this is needed:** Without a clear contract, attention becomes a "god module" that tries to do everything. Ecology signals must be **observable proxies**, not hardcoded decisions.
+
+| Ticket | Description | Priority | Status |
+|:-------|:------------|:---------|:-------|
+| 011A | Economy Pressure | High | ⏳ Pending |
+| 011B | Minimal Candidate Type | Medium | ⏳ Pending |
+| 011C | Presence State | Medium | ⏳ Pending |
+| 011D | Ecology Signals Contract | High | ⏳ Pending |
+
+**Exit Criteria for Sprint 2.0A:**
+- [ ] Economy Pressure is implemented as a meta‑pressure
+- [ ] Minimal Candidate Type is added to workspace candidates
+- [ ] Presence State is defined and integrated
+- [ ] Ecology Signals Contract is documented and enforced
 
 ---
 
@@ -110,10 +155,20 @@ These constraints explain architectural decisions and prevent wasted effort on i
 | **Architecture** | `IdentityModel()` constructed inline | Introduce `IdentityManager` | Sprint 3+ |
 | **Implementation** | Hypothesis classification uses `type="world"` | Replace with structured `HypothesisUpdate` | 2.1D or 3 |
 | **Implementation** | HNSW index removal (commented out) | Revisit when pgvector supports 3072 | Future |
+| **Architecture** | Ecology signals not yet formalized | Add Ecology Signals Contract | Sprint 2.0A |
 
 ---
 
 ## 🗺️ Upcoming Sprints
+
+### Sprint 2.0A – Cognitive Ecology Contracts
+
+| Ticket | Description | Priority |
+|:-------|:------------|:---------|
+| 011A | Economy Pressure | High |
+| 011B | Minimal Candidate Type | Medium |
+| 011C | Presence State | Medium |
+| 011D | Ecology Signals Contract | High |
 
 ### Sprint 2.1D – Social Cognition
 
@@ -187,19 +242,12 @@ These constraints explain architectural decisions and prevent wasted effort on i
 ## 📚 Links
 
 - **Architectural Constitution & Research Incubator:** `docs/research_incubator/README.md`
+- **Primitives Catalog:** `docs/PRIMITIVES.md`
+- **Learnings:** `docs/LEARNINGS.md`
 - **Project Map:** `PROJECT_MAP.md`
 - **Architecture Details:** `ARCHITECTURE.md`
 
 ---
-## 🔬 Research Phase (Complete)
-
-As of 2026-07-07, all major research and synthesis is complete. The project has:
-
-- Extracted **12 universal primitives** (see `docs/PRIMITIVES.md`).
-- Documented key insights (see `docs/LEARNINGS.md`).
-- Integrated anti‑echo and JEPA concepts into the incubator.
-- Identified the **timezone bug** (fixed).
-- Confirmed that **no new frameworks** are needed—only calibration.
 
 ## 🔬 Anti‑Echo Research (Captured)
 
@@ -207,8 +255,10 @@ The anti‑echo and cognitive diversity research has been fully captured in:
 
 - `docs/research_incubator/README.md` – Cognitive Diversity & Anti‑Echo Architecture entry.
 - `docs/LEARNINGS.md` – Key insights, optimization hierarchy, and translation vs interpretation.
-- `docs/PRIMITIVES.md` – The 12 primitives, including Variation Health.
+- `docs/PRIMITIVES.md` – The 24 primitives, including Variation Health.
 
 The project is now firmly in the **Behavioural Calibration** phase.
+
+---
 
 **All status information is maintained here. Update this file when sprints are completed or new tickets are added.**

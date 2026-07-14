@@ -37,6 +37,7 @@ from engine.memory import increment_memory_usage
 from datetime import datetime
 from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibration
 from engine.attention_instrumentation import AttentionInstrumentation
+from engine.generativity_estimator import get_estimator
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +396,15 @@ async def load_workspace(
     enriched_candidates = []
     for _, item_type, source_id, payload, _ in candidates:
         pressures = await _compute_pressure_field(payload, state, user_embedding, prediction_error)
+
+        # === Observational: Log generativity estimates (Ticket 011) ===
+        # This does NOT influence cognition. It only logs estimates for validation.
+        try:
+            estimator = get_estimator()
+            gen_est = await estimator.estimate(payload, state, {"turn": current_turn})
+            estimator.log_estimate(source_id, gen_est)
+        except Exception as e:
+            logger.debug(f"Generativity logging failed: {e}")
         
         # Inertia boost
         if previous_workspace_items:

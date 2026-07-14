@@ -20,6 +20,7 @@ from engine.prediction import compute_prediction_error
 from engine.attention import load_workspace, broadcast_feedback, WorkspaceItem
 from engine.stage1_monologue import run_monologue
 from models.memory_event import MemoryEvent
+from engine.generativity_estimator import get_estimator
 from models.monologue_output import MonologueOutput
 from models.narrative import NarrativeThread
 from engine.narrative_manager import NarrativeManager
@@ -34,6 +35,8 @@ from models.hypothesis import Hypothesis
 from engine.events import EventLogger
 from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibration
 from engine.attention_instrumentation import AttentionInstrumentation
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -67,6 +70,8 @@ class TurnPipeline:
         self._event_logger.log_session_start()
         self.attention_config = AttentionCalibration.from_env()
         self.attention_instrumentation = AttentionInstrumentation(self.attention_config)
+        # Ticket 011: Generativity Estimator
+        self.generativity_estimator = get_estimator()
 
         
 
@@ -569,7 +574,7 @@ class TurnPipeline:
             current_turn=current_turn,
             workspace_size=workspace_size,
             previous_workspace_items=self._previous_workspace,
-            thought_persistence_urge=thought_urge
+            thought_persistence_urge=thought_urge,
             instrumentation=self.attention_instrumentation
         )
 
@@ -578,10 +583,6 @@ class TurnPipeline:
 
         return workspace_items, telemetry
     
-    def shutdown(self):
-        """Clean up resources: flush attention logs and log session end."""
-        self.attention_instrumentation.close()
-        self._event_logger.log_session_end()
 
     async def _store_assistant_memory(self, dialogue: str, turn_count: int, significance_override: Optional[float] = None):
         if dialogue == "...":
@@ -601,6 +602,19 @@ class TurnPipeline:
             await store_memory(memory_event)
         except Exception as e:
             logger.warning(f"Failed to store assistant memory: {e}")
+
+    def shutdown(self) -> None:
+        """Shutdown the pipeline and flush all logs."""
+        if hasattr(self, 'attention_instrumentation'):
+            self.attention_instrumentation.close()
+        if hasattr(self, 'generativity_estimator'):
+            summary = self.generativity_estimator.get_summary()
+            logger.info(f"Generativity Summary: {summary}")
+        if hasattr(self, '_event_logger'):
+            self._event_logger.log_session_end()
+
+
+# End of TurnPipeline class
 
 
 # For backward compatibility, keep the old function signature

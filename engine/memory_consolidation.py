@@ -24,6 +24,7 @@ from db.connection import get_pool
 from models.memory_event import MemoryEvent
 from models.hypothesis import Hypothesis
 from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +291,6 @@ async def _summarize_sparse_content(content: str) -> str:
     sentences = content.split(".")
     return ". ".join(sentences[:3])[:MAX_SUMMARY_LENGTH]
 
-
 async def archive_old_memories(session_id: str, older_than_days: int = ARCHIVE_OLDER_THAN_DAYS) -> int:
     """
     Archive old memories using content‑adaptive strategy:
@@ -302,6 +302,9 @@ async def archive_old_memories(session_id: str, older_than_days: int = ARCHIVE_O
         return 0
 
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    # Ensure cutoff_date is timezone-aware
+    if cutoff_date.tzinfo is None:
+        cutoff_date = cutoff_date.replace(tzinfo=timezone.utc)
 
     async with pool.acquire() as conn:
         old_memories = await conn.fetch("""
@@ -343,7 +346,6 @@ async def archive_old_memories(session_id: str, older_than_days: int = ARCHIVE_O
         }))
 
         return archived_count
-
 
 # ============================================
 # Periodic Consolidation (called from worker)

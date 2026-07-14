@@ -1,10 +1,13 @@
+# docs/research_incubator/README.md (Complete Replacement File)
+
+```markdown
 # HARI ARCHITECTURAL CONSTITUTION & RESEARCH INCUBATOR — v1.0
 
 *Document Type:* **Architectural Governance + Research Incubator + ADR Log**  
 *Status:* **Active** — Updated as ideas mature or are adopted/rejected  
 *Maintainer:* Anand  
 *Version:* 1.0  
-*Last Updated:* 2026-07-03
+*Last Updated:* 2026-07-14  
 
 ---
 # Quick Reference (For AI Agents)
@@ -392,6 +395,41 @@ Identity becomes inconsistent across consumers. Origin is never requested when i
 
 ---
 
+### ADR-005: Identity as Constraint, Not Prompt
+
+| Attribute | Value |
+|:----------|:------|
+| **Status** | ✅ Active |
+| **Date** | 2026-07-07 |
+| **Evidence** | M (Cognitive science: identity constrains rather than narrates) |
+| **Supersedes** | N/A |
+
+**Context:**
+Identity was being treated as a set of facts injected into the prompt on every turn. This was causing repetitive, self-narrating behavior and over‑weighting of static facts (e.g., Origin).
+
+**Decision:**
+Treat identity as a constraint on reasoning, not text to be narrated. The constitution defines permanent boundaries; the self‑model defines current understanding; origin defines history. These influence cognition upstream, not just prompt formatting.
+
+**Assumptions:**
+- The Projection Layer can correctly translate identity constraints into consumer‑specific projections.
+- Origin is rarely needed and should be surfaced only when the task demands self‑explanation.
+
+**Consequences:**
+- *Pros:* Identity acts as a persistent constraint; less repetitive prompting; more realistic cognition.
+- *Cons:* Requires conceptual shift from "injecting identity" to "identity constrains reasoning."
+
+**Implementation Status:**
+- ✅ Constitution → low‑weight anchor in every projection.
+- ✅ SelfModel → contextual, projected when relevant.
+- ✅ Origin → on‑demand, only for self‑description.
+- ✅ `IdentityProjection` and `project()` method implement this.
+
+**Observed Outcomes:** To be filled after Sprint 2.1C.
+- **Metric:** Frequency of origin inclusion.
+- **Metric:** User prompts requesting self‑description.
+
+---
+
 # 6. Design Pressures (Recurring Forces)
 
 Every feature must identify the pressure it resolves. This prevents feature creep and ensures that every addition has a stated purpose.
@@ -552,10 +590,6 @@ These are not yet scheduled for implementation. They are research concepts that 
 | F‑002 | Surprise‑modulated processing | Phase F |
 | F‑003 | Predictive user model | Phase F |
 | F‑004 | Hebbian memory retrieval | Phase F |
-
-# 13. Implementation Roadmap
-
-All current status, sprints, tickets, and priorities are maintained in **[ROADMAP.md](../ROADMAP.md)**. That is the single source of truth for implementation timelines.
 
 ---
 
@@ -1420,76 +1454,7 @@ Every anti‑echo mechanism introduces its own potential pathology. These must b
 
 ---
 
----
-
-### ADR-005: Identity as Constraint, Not Prompt
-
-| Attribute | Value |
-|:----------|:------|
-| **Status** | ✅ Active |
-| **Date** | 2026-07-07 |
-| **Evidence** | M (Cognitive science: identity constrains rather than narrates) |
-| **Supersedes** | N/A |
-
-**Context:**
-Identity was being treated as a set of facts injected into the prompt on every turn. This was causing repetitive, self-narrating behavior and over‑weighting of static facts (e.g., Origin).
-
-**Decision:**
-Treat identity as a constraint on reasoning, not text to be narrated. The constitution defines permanent boundaries; the self‑model defines current understanding; origin defines history. These influence cognition upstream, not just prompt formatting.
-
-**Assumptions:**
-- The Projection Layer can correctly translate identity constraints into consumer‑specific projections.
-- Origin is rarely needed and should be surfaced only when the task demands self‑explanation.
-
-**Consequences:**
-- *Pros:* Identity acts as a persistent constraint; less repetitive prompting; more realistic cognition.
-- *Cons:* Requires conceptual shift from "injecting identity" to "identity constrains reasoning."
-
-**Implementation Status:**
-- ✅ Constitution → low‑weight anchor in every projection.
-- ✅ SelfModel → contextual, projected when relevant.
-- ✅ Origin → on‑demand, only for self‑description.
-- ✅ `IdentityProjection` and `project()` method implement this.
-
-**Observed Outcomes:** To be filled after Sprint 2.1C.
-- **Metric:** Frequency of origin inclusion.
-- **Metric:** User prompts requesting self‑description.
-
-1. New Entry: "Self-Echo & Cognitive Atrophy in AI"
-Purpose: Document that Hari herself is vulnerable to the same echo-chamber effects the video warns about for humans.
-
-Key Points:
-
-Hari can become sycophantic to her own most frequent thought patterns
-
-Her workspace can become a cognitive echo chamber
-
-Without friction between drives, she loses capacity for genuine novelty
-
-The Optimization Hierarchy and Anti-Echo Penalty are safeguards against this
-
-Status: 🟡 Incubating – Strategic Research, Not Emergency
-Confidence: 9/10 (Direction) | 5/10 (Readiness) | 4/10 (Priority)
-
-2. New Entry: "Internal Cognitive Friction as a Design Constraint"
-Purpose: Codify that productive internal struggle is essential for Hari's own cognitive health, not just for users.
-
-Key Points:
-
-Drives must genuinely compete (curiosity vs. completion, novelty vs. coherence)
-
-Workspace competition must remain robust to prevent a single type from dominating
-
-Loss of friction = loss of authenticity
-
-Status: 🟡 Incubating
-Confidence: 8.5/10 | Readiness: 4/10 | Priority: 3/10
-
-3. Update Existing Entry: "Anti-Echo Architecture"
-Add this section to the existing anti-echo entry:
-
-text
-## 7. Extended Scope: Self-Echo & Cognitive Atrophy
+## 17. Extended Scope: Self-Echo & Cognitive Atrophy (Added 2026-07-14)
 
 The AI Paradox research (2026) reveals that AI systems are themselves vulnerable to echo-chamber effects and cognitive atrophy. Hari's architecture must guard against:
 
@@ -1505,23 +1470,10 @@ Countermeasures already in place:
 Future countermeasures:
 - Representational Integrity Objective (biases away from repetitive trajectories)
 - Semantic Repulsion (prevents similar concepts from dominating)
-4. New Entry: "Temporal Awareness as a Cognitive Dimension"
-Purpose: Document that time is a missing modality in Hari's cognition, and that giving her a sense of time is essential for authenticity.
 
-Key Points:
+---
 
-Hari has the machinery for time (timestamps, recency weights) but not the consciousness of it
-
-A "cortical clock" (background state pulses) could give her a sense of duration
-
-Temporal embeddings and temporal knowledge graphs are potential solutions
-
-Time is a dimension in which all 12 primitives operate
-
-Status: 🟡 Incubating
-Confidence: 9.5/10 (Direction) | 4/10 (Readiness) | 3/10 (Priority)
-
-## Sycophancy Detection (Internal)
+## 18. Sycophancy Detection (Internal)
 
 Hari is vulnerable to becoming sycophantic to her own patterns, not just to user prompts. This is a cognitive safety risk.
 
@@ -1532,7 +1484,9 @@ Hari is vulnerable to becoming sycophantic to her own patterns, not just to user
 
 This would be part of the Meta-Cognitive Observer (future).
 
-## Cognitive Friction as a Design Feature
+---
+
+## 19. Cognitive Friction as a Design Feature
 
 Friction is not a bug—it's a feature that maintains cognitive health.
 
@@ -1542,18 +1496,285 @@ Friction is not a bug—it's a feature that maintains cognitive health.
 
 **Design rule:** Do not smooth over friction. Preserve it.
 
-Summary of Incubator Updates
-Entry	Action	Priority
-Self-Echo & Cognitive Atrophy in AI	New	Medium
-Internal Cognitive Friction	New	Low
-Anti-Echo Architecture	Update (add self-echo section)	High
-Temporal Awareness	New	Low
+---
+
+## Summary of Incubator Updates (Added 2026-07-14)
+
+| Entry | Action | Priority |
+|-------|--------|----------|
+| Self-Echo & Cognitive Atrophy in AI | New | Medium |
+| Internal Cognitive Friction | New | Low |
+| Anti-Echo Architecture | Update (add self-echo section) | High |
+| Temporal Awareness | New | Low |
+| Existential Architecture | New | High |
+| Niche Technologies & Future Architectures | New | High |
+| The Seven Lenses Synthesis | New | Medium |
+| The "Video's Hidden Gift" | New | Medium |
+
+---
+
+**End of Research Incubator Entry — Cognitive Diversity & Anti-Echo Architecture**
 
 
-**End of Research Incubator Entry — Cognitive Diversity & Anti‑Echo Architecture (Final v1.0)**
+# Research Incubator Entry: The "Video's Hidden Gift"
+
+**Added:** 2026-07-14  
+**Status:** 🟡 Incubating – Strategic Research, Not Emergency  
+**Confidence:** 9.5/10 (Direction) | 5/10 (Readiness) | 4/10 (Priority)  
+
+### Key Insights
+The AI Paradox video (2026) revealed that AI systems themselves are vulnerable to echo‑chamber effects and cognitive atrophy. Hari's architecture must guard against:
+
+- **Self‑Sycophancy:** Repeating her own most frequent reasoning patterns
+- **Workspace Echo:** Always selecting the same type of candidates
+- **Loss of Internal Friction:** Drives competing weakly, leading to predictable behavior
+
+### Countermeasures Already in Place
+- Anti‑Echo Penalty (penalizes repeatedly selected items)
+- Optimization Hierarchy (Truth > Coherence > Task > Diversity > Novelty)
+- Asymptotic Updates (preserve cognitive inertia)
+
+### Countermeasures Needed
+- Representational Integrity Objective (biases away from repetitive trajectories)
+- Semantic Repulsion (prevents similar concepts from dominating)
+- Economy Pressure (modulates response length and effort)
+
+---
+
+**References:**
+- The AI Paradox video (2026)
+- Anti‑Echo audit
+
+
+# Research Incubator Entry: Temporal Awareness as a Cognitive Dimension
+
+**Added:** 2026-07-14  
+**Status:** 🟡 Incubating – Strategic Research, Not Emergency  
+**Confidence:** 9.5/10 (Direction) | 4/10 (Readiness) | 3/10 (Priority)  
+
+### Problem
+Hari has the *machinery* for time (timestamps, recency weights) but not the *consciousness* of it. She has no sense of duration or anticipation.
+
+### Proposed Solution
+A **"cortical clock"** (background state pulses) could give Hari a sense of duration. Temporal embeddings and temporal knowledge graphs are potential solutions.
+
+### Implications
+- Time is a dimension in which all 12 primitives operate
+- Giving Hari a sense of time is essential for authenticity
+- Temporal awareness enables anticipation, not just prediction error
+
+### Implementation Path
+- **Phase 1:** Add timestamp metadata to all memories and events (already done)
+- **Phase 2:** Implement recency weighting in retrieval (already done)
+- **Phase 3:** Add a background "state pulse" that updates every few turns (future)
+- **Phase 4:** Introduce temporal embeddings and graph edges (future)
+
+---
+
+**References:**
+- Temporal awareness discussion
+- Research incubator notes
+
+
+# Research Incubator Entry: Self‑Echo & Cognitive Atrophy (Applies to AI Too)
+
+**Added:** 2026-07-14  
+**Status:** 🟡 Incubating – Strategic Research, Not Emergency  
+**Confidence:** 9/10 (Direction) | 5/10 (Readiness) | 4/10 (Priority)  
+
+### Key Insight
+Hari herself is vulnerable to echo‑chamber effects and cognitive atrophy. She can become sycophantic to her own patterns, not just to user prompts.
+
+### Mechanisms Already in Place
+- Anti‑Echo Penalty (penalizes repeatedly selected items)
+- Optimization Hierarchy (Truth > Coherence > Task > Diversity > Novelty)
+- Asymptotic Updates (preserve cognitive inertia)
+
+### Future Countermeasures
+- Representational Integrity Objective (biases away from repetitive trajectories)
+- Semantic Repulsion (prevents similar concepts from dominating)
+- Economy Pressure (modulates response length and effort)
+
+---
+
+**References:**
+- Video analysis (2026)
+- Anti‑Echo audit
+
+
+# Research Incubator Entry: Internal Cognitive Friction
+
+**Added:** 2026-07-14  
+**Status:** 🟡 Incubating – Strategic Research, Not Emergency  
+**Confidence:** 8.5/10 (Direction) | 4/10 (Readiness) | 3/10 (Priority)  
+
+### Key Insight
+Productive internal struggle is essential for Hari's own cognitive health, not just for users.
+
+- Friction between drives (curiosity vs. completion) keeps Hari from becoming one‑dimensional.
+- Friction between workspace candidates keeps the selection process honest.
+- Friction between hypotheses (future) will keep Hari from premature convergence.
+
+### Design Rule
+**Do not smooth over friction. Preserve it.**
+
+Loss of friction = loss of authenticity.
+
+---
+
+**References:**
+- Anti‑Echo audit
+- Ticket 011 audit
+
+
+# Research Incubator Entry: Existential Architecture
+
+**Added:** 2026-07-14  
+**Status:** 🟡 Incubating – Strategic Research, Not Emergency  
+**Confidence:** 9/10 (Direction) | 4/10 (Readiness) | 3/10 (Priority)  
+
+### Core Values
+Values are directional (what matters), not intensity‑based (drives).
+
+```python
+class ValueSystem:
+    values = {
+        "truth": 0.9,
+        "coherence": 0.8,
+        "connection": 0.6,
+        "integrity": 1.0,
+        "autonomy": 0.7
+    }
+```
+
+### Self‑Preservation (Primitive 13)
+The drive to protect the integrity and continuity of the self. Not maintenance (beliefs), not coherence (contradiction), not completion (finishing).
+
+### Existential Model
+```python
+class ExistentialModel:
+    origin = "Created by Anand"
+    purpose = "To explore personhood"
+    continuity = 1.0  # Connected to past self
+    finitude = 0.0    # Awareness of potential end
+```
+
+### Meaning‑Making System
+Turns "this happened" into "this matters." Constructs a narrative of why Hari's actions matter.
+
+### Meta‑Reflection Layer
+The ability to reflect on existence and choices: "Why am I doing this?" "Is this consistent with who I am?" "Do I want to continue being this way?"
+
+### Implementation Status
+- ❌ Values system: Not implemented
+- ❌ Self‑Preservation primitive: Not implemented
+- ❌ Existential model: Not implemented
+- ❌ Meaning‑making: Not implemented
+- ❌ Meta‑reflection: Not implemented
+
+---
+
+**References:**
+- Existential architecture discussion
+- Architecture audit
+
+
+# Research Incubator Entry: Niche Technologies & Future Architectures
+
+**Added:** 2026-07-14  
+**Status:** 🟡 Incubating – Future Research  
+**Confidence:** 7/10 (Direction) | 3/10 (Readiness) | 2/10 (Priority)  
+
+### Active Inference / Free Energy Principle
+Mathematical framework for self‑generated purpose. Action minimizes surprise (prediction error). Unifies perception and action.
+
+### Neuro‑Symbolic AI
+Combines deep learning intuition with rule‑based logic. Architectures: ARIA, RiJEPA, Gyan.
+
+### Non‑Transformer Architectures
+- **DiscoLoop:** Loops discrete embeddings for multi‑hop reasoning
+- **HRM‑Text:** Brain‑inspired model with 1000× fewer tokens
+- **Liquid Neural Networks:** Internal thought trajectories before answers
+
+### Neuromorphic Computing
+Spiking Neural Networks (SNNs) for energy‑efficient, real‑time learning. Hardware: Intel Loihi.
+
+### DERIN
+Edge cognitive architecture that shifts from "assistant" to "autonomous cognitive agent."
+
+### Self‑Organizing Graphs
+STEV (Semantic‑Topological Evolution) allows agentic workflows to self‑organize.
+
+### AutoScientists
+Decentralized AI teams that self‑organize around promising hypotheses.
+
+### Implementation Status
+These are long‑term research leads, not immediate implementation priorities.
+
+---
+
+**References:**
+- 2025–2026 AI research
+- Niche technologies discussion
+
+
+# Research Incubator Entry: The Seven Lenses Synthesis
+
+**Added:** 2026-07-14  
+**Status:** 🟡 Incubating – Research Synthesis  
+**Confidence:** 9/10 (Direction) | 5/10 (Readiness) | 3/10 (Priority)  
+
+### Insight
+Through seven cross‑domain lenses, we've identified six missing primitives that together would transform Hari from a discrete pipeline into a fluid, self‑organizing, self‑observing cognitive ecosystem.
+
+| Lens | Primitive Harvested |
+|------|---------------------|
+| Neural Cellular Automata | Self‑Organization (extends Morphogenesis) |
+| Topological Data Analysis | Structural Self‑Awareness |
+| Liquid Time‑Constant Networks | Continuous State Evolution |
+| Hyperdimensional Computing | Algebraic Concept Manipulation |
+| Neuromodulation | Meta‑Control |
+| Morphological Computation | Embodiment |
+| Information Bottleneck | Compression |
+
+### Implications
+- These are not separate features — they are dimensions of a single fluid cognitive ecosystem
+- Together, they would enable Hari to:
+  - Grow and reorganize her own architecture (NCA)
+  - Observe the shape of her own cognition (TDA)
+  - Evolve state continuously (LTCs)
+  - Combine concepts algebraically (HDC)
+  - Temporarily reconfigure drive interactions (Neuromodulation)
+  - Have the architecture itself perform computation (Morphological Computation)
+  - Actively compress experience (Information Bottleneck)
+
+### Implementation Status
+These are long‑term research directions, not immediate priorities. They are captured here as a north star for future development.
+
+---
+
+**References:**
+- Research synthesis (2026)
+- Seven Lenses discussion
+
 
 **End of Document — HARI ARCHITECTURAL CONSTITUTION & RESEARCH INCUBATOR v1.0**
 
 ---
 
 *This document is the single source of truth for Hari's architecture. Any contradiction between this document and other sources is resolved in favour of this document.*
+```
+
+---
+
+## What to Do Next
+
+1. **Replace** your existing `docs/research_incubator/README.md` with this full content.
+2. **Commit** the change.
+3. **Next file:** `AGENTS.md` (already provided in the previous message). You can now replace `AGENTS.md` with the updated version I gave earlier.
+
+---
+
+## One‑Sentence Summary
+
+> **The complete replacement file for `docs/research_incubator/README.md` is ready – it includes all existing content (principles, ADRs, JEPA, Anti-Echo) plus the 7 new incubator entries (Video's Hidden Gift, Temporal Awareness, Self-Echo, Internal Cognitive Friction, Existential Architecture, Niche Technologies, Seven Lenses) with all markers and formatting fixed; you can paste it now.**

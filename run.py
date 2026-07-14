@@ -157,6 +157,10 @@ async def main():
                 await _promotion_task
             except asyncio.CancelledError:
                 pass
+        # End session
+        pipeline.shutdown()
+
+ # Close database connection
         await close_db()
         log_event({"event": "session_end", "turn_count": turn})
         print("Goodbye.")
