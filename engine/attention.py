@@ -38,6 +38,7 @@ from datetime import datetime
 from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibration
 from engine.attention_instrumentation import AttentionInstrumentation
 from engine.generativity_estimator import get_estimator
+from models.narrative import NarrativeThread
 
 logger = logging.getLogger(__name__)
 
@@ -97,21 +98,11 @@ class WorkspaceItem:
         self.metrics.last_attended_turn = value
 
 
-@dataclass
-class NarrativeThread:
-    """First‑class narrative thread for long‑running topics."""
-    id: str
-    goal_description: str
-    current_status: str = "active"          # active, blocked, completed
-    completion_estimate: float = 0.0        # 0.0 → 1.0
-    activation: float = 0.5                 # current salience (decays over time)
-    last_attended_turn: int = 0
 
 
 # -----------------------------------------------------------------------------
 # Pressure Field Computation
 # -----------------------------------------------------------------------------
-
 async def _compute_pressure_field(
     candidate: Dict[str, Any],
     state: HariState,
@@ -119,7 +110,7 @@ async def _compute_pressure_field(
     prediction_error: float,
 ) -> Dict[str, float]:
     """
-    Returns a vector of four pressure values for a single candidate.
+    Returns a vector of pressure values for a single candidate.
     """
     pressures = {}
 
@@ -129,35 +120,57 @@ async def _compute_pressure_field(
     if user_embedding is not None and candidate_embedding is not None:
         try:
             candidate_emb = np.array(candidate_embedding, dtype=np.float32)
-            # Normalise embeddings for cosine similarity
             user_norm = user_embedding / (np.linalg.norm(user_embedding) + 1e-8)
             cand_norm = candidate_emb / (np.linalg.norm(candidate_emb) + 1e-8)
             cos_sim = np.dot(user_norm, cand_norm)
-            relevance = (cos_sim + 1) / 2   # map [-1,1] → [0,1]
+            relevance = (cos_sim + 1) / 2
         except Exception as e:
             logger.warning(f"Relevance pressure failed: {e}")
     pressures["relevance"] = relevance
 
     # 2. Novelty Pressure: driven by prediction error
-    #    Clamp prediction error to [0,1] range
     novelty = min(1.0, max(0.0, prediction_error))
     pressures["novelty"] = novelty
 
-    # 3. Curiosity Pressure: knowledge gap potential
-    curiosity_pressure = state.curiosity
-    if candidate.get("item_type") == "curiosity_node":
-        curiosity_pressure *= 1.5   # boost for actual curiosity nodes
-    pressures["curiosity"] = min(1.0, curiosity_pressure)
+    # 3. Curiosity Pressure (Ecology Signals Contract: no item-type logic)
+    curiosity_boost = float(candidate.get("information_gap", 0.0))
+    curiosity_pressure = min(1.0, state.curiosity * (1.0 + curiosity_boost))
+    pressures["curiosity"] = curiosity_pressure
 
-    # 4. Completion Pressure: finish ongoing thoughts
-    completion_pressure = state.completion
-    if candidate.get("item_type") in ("open_thread", "narrative_thread"):
-        # Open threads get an extra boost from their own urgency
-        urgency = candidate.get("urgency", 0.5)
-        completion_pressure = (completion_pressure + urgency) / 2
-    pressures["completion"] = min(1.0, completion_pressure)
+    # 4. Completion Pressure (Ecology Signals Contract: no item-type logic)
+    completion_urgency = float(candidate.get("closure_pressure", 0.0))
+    completion_pressure = min(1.0, state.completion * (1.0 + completion_urgency))
+    pressures["completion"] = completion_pressure
+
+    # 5. Exploratory Potential (Ticket 011)
+    exploration_progress = float(candidate.get("exploration_progress", 0.0))
+    exploratory_potential = (novelty * 0.5) + (curiosity_pressure * 0.5)
+    if candidate.get("item_type") == "curiosity_node":
+        exploratory_potential *= (1.0 - exploration_progress)
+    pressures["exploratory_potential"] = min(1.0, exploratory_potential)
+
+    # 6. Shared Significance (Ticket 012)
+    # Uses the shared_significance module (or you can inline as fallback)
+    try:
+        from engine.shared_significance import compute_shared_significance
+        shared_significance = compute_shared_significance(candidate, state)
+    except ImportError:
+        # Fallback inline computation if module missing
+        item_significance = float(candidate.get("significance", 0.5))
+        shared_significance = (item_significance * 0.5) + (float(state.care) * 0.5)
+    pressures["shared_significance"] = min(1.0, shared_significance)
 
     return pressures
+
+
+    # Legacy alias for engine/__init__.py (avoids refactoring downstream)
+async def compute_salience(pressures: Dict[str, float], state: HariState) -> float:
+    """Deprecated: use compute_total_salience directly."""
+    return await compute_total_salience(pressures, state)
+
+# -----------------------------------------------------------------------------
+# Salience Calculation (Tickets 010, 011, 012)
+# -----------------------------------------------------------------------------
 
 async def compute_total_salience(
     pressures: Dict[str, Any],
@@ -221,7 +234,7 @@ async def compute_total_salience(
             candidate_type=candidate_type or "unknown",
             pressures=pressures,
             weights=weights,
-            raw_score=weighted_sum,
+            raw_score=weighted_sum,      # Proper raw score
             final_score=salience,
             was_selected=False  # Will be updated after selection
         )
@@ -230,15 +243,6 @@ async def compute_total_salience(
         salience = float(salience.item())
     
     return max(0.0, min(1.0, salience))
-
-    # Legacy alias for engine/__init__.py (avoids refactoring downstream)
-async def compute_salience(pressures: Dict[str, float], state: HariState) -> float:
-    """Deprecated: use compute_total_salience directly."""
-    return await compute_total_salience(pressures, state)
-
-
-
-
 # -----------------------------------------------------------------------------
 # Softmax Competition (State‑Driven Temperature)
 # -----------------------------------------------------------------------------
@@ -256,30 +260,49 @@ def _softmax(scores: List[float], temperature: float) -> List[float]:
 
 
 def broadcast_feedback(elected: List[WorkspaceItem], state: HariState) -> None:
+    """
+    Ticket 013: Strengthened feedback using asymptotic updates.
+    
+    Ecology Signals Contract:
+    - information_gap: How much uncertainty this candidate resolves
+    - closure_pressure: How urgently this candidate needs resolution
+    - coherence_factor: How well this candidate integrates with current cognition
+    
+    All signals are optional. Missing signals default to 0.0.
+    Coefficients are calibrated and documented in ATTENTION_COEFFICIENTS.md.
+    """
     if not elected:
         return
     n = len(elected)
 
-    curiosity_ratio = sum(1 for item in elected if item.item_type == "curiosity_node") / n
-    narrative_ratio = sum(1 for item in elected if item.item_type == "narrative_thread") / n
-    open_thought_ratio = sum(1 for item in elected if item.item_type == "open_thought") / n
+    # Aggregate ecology signals from payloads (optional, default 0.0)
+    curiosity_signal = sum(item.payload.get("information_gap", 0.0) for item in elected) / n
+    completion_signal = sum(item.payload.get("closure_pressure", 0.0) for item in elected) / n
+    coherence_signal = sum(item.payload.get("coherence_factor", 0.0) for item in elected) / n
+    
+    diversity_signal = len({item.item_type for item in elected}) / max(n, 1)
 
-    state.curiosity = min(1.0, state.curiosity + curiosity_ratio * 0.025)
-    state.coherence = min(1.0, state.coherence + narrative_ratio * 0.015)
+    # V1 Coefficients (Ticket 013 calibration)
+    # curiosity: 0.15  | completion: 0.15  | coherence: 0.10  | arousal: 0.05
+    state.update({
+        "curiosity": curiosity_signal * 0.15,
+        "completion": completion_signal * 0.15,
+        "coherence": coherence_signal * 0.10,
+        "arousal": diversity_signal * 0.05,
+    }, source="BROADCAST", reason="workspace_feedback")
 
-    engagement_boost = (open_thought_ratio + narrative_ratio) * 0.02
-    state.engagement = min(1.0, state.engagement + engagement_boost)
-    state.care = min(1.0, state.care + engagement_boost * 0.25)
-
-    diversity = len({item.item_type for item in elected}) / max(n, 1)
-    state.arousal = min(1.0, state.arousal + diversity * 0.015)
-
-    completion_ratio = sum(1 for item in elected if item.item_type == "open_thread") / n
-    state.completion = min(1.0, state.completion + completion_ratio * 0.025)
-
-    positive = sum(1 for item in elected if item.payload.get("memory_emotional_tone") == "positive") / n
-    negative = sum(1 for item in elected if item.payload.get("memory_emotional_tone") == "negative") / n
-    state.valence = max(-1.0, min(1.0, state.valence + positive * 0.025 - negative * 0.025))
+    # Debug validation (only in development)
+    if __debug__:
+        for item in elected:
+            has_signal = any(
+                key in item.payload 
+                for key in ["information_gap", "closure_pressure", "coherence_factor"]
+            )
+            if not has_signal:
+                logger.debug(
+                    f"Candidate {item.id} ({item.item_type}) has no ecology signals. "
+                    f"This contributes 0.0 to broadcast_feedback."
+                )
 
 
 # -----------------------------------------------------------------------------
@@ -331,45 +354,72 @@ async def load_workspace(
 
     # Add memories
     for mem in memories:
+        # V1 Proxy: Memory significance contributes to coherence
+        significance = getattr(mem, "significance", 0.5)
         add_candidate("memory", mem.id, {
             "content": mem.content,
             "embedding": getattr(mem, "embedding", None),
-            "significance": getattr(mem, "significance", 0.5),
+            "significance": significance,
             "id": mem.id,
+            # Ecology Signals (Ticket 013)
+            "information_gap": 0.0,  # V1: Memories don't create new uncertainty
+            "closure_pressure": 0.0,  # V1: Memories don't demand resolution
+            "coherence_factor": 0.1 * significance,  # V1: Significance contributes to coherence
         })
     # Add hypotheses
     for hyp in hypotheses:
         extracted_text = (hyp.get("content") or hyp.get("statement") or "").strip()
         if not extracted_text:
             continue
+        confidence = float(hyp.get("confidence") or hyp.get("urgency") or 0.5)
         add_candidate("hypothesis", hyp.get("id", "unknown"), {
             "content": extracted_text,
-            "urgency": float(hyp.get("confidence") or hyp.get("urgency") or 0.5),
+            "urgency": confidence,
             "id": hyp.get("id"),
+            # Ecology Signals (Ticket 013)
+            "information_gap": 0.2 * confidence,  # V1: Hypotheses resolve uncertainty
+            "closure_pressure": 0.3 * confidence,  # V1: Hypotheses need validation
+            "coherence_factor": 0.3 * confidence,  # V1: Confidence affects coherence
         })
     # Add curiosity nodes
     for node in curiosity_nodes:
+        importance = float(node.get("importance", 0.5))
         add_candidate("curiosity_node", node.get("id", "unknown"), {
             "content": node.get("question", ""),
             "embedding": node.get("embedding"),
-            "importance": node.get("importance", 0.5),
+            "importance": importance,
+            "exploration_progress": node.get("exploration_progress", 0.0),
             "id": node.get("id"),
+            # Ecology Signals (Ticket 013)
+            "information_gap": importance,  # V1: Curiosity = information gap
+            "closure_pressure": 0.1 * importance,  # V1: Curiosity has low closure pressure
+            "coherence_factor": 0.2 * importance,  # V1: Curiosity challenges coherence
         })
     # Add narrative threads
     for thread in narrative_threads:
-        # Use actual NarrativeThread model fields
+        # V1 Proxy: Unfinished threads demand closure
+        closure_urgency = (1.0 - thread.completion_estimate) * thread.emotional_investment
         add_candidate("narrative_thread", thread.id, {
-            "content": thread.description,                          # was goal_description
+            "content": thread.description,
             "completion_estimate": thread.completion_estimate,
-            "activation": thread.emotional_investment,              # was activation
+            "activation": thread.emotional_investment,
             "id": thread.id,
+            # Ecology Signals (Ticket 013)
+            "information_gap": 0.1,  # V1: Narratives create some uncertainty
+            "closure_pressure": closure_urgency,  # V1: Unfinished threads demand closure
+            "coherence_factor": 0.1,  # V1: Narratives support coherence
         })
     # Add open threads
     for ot in open_threads:
+        urgency = ot.get("urgency", 0.5)
         add_candidate("open_thought", ot.get("id", "unknown"), {
             "content": ot.get("content", ""),
-            "urgency": ot.get("urgency", 0.5),
+            "urgency": urgency,
             "id": ot.get("id"),
+            # Ecology Signals (Ticket 013)
+            "information_gap": 0.1,  # V1: Open thoughts create some uncertainty
+            "closure_pressure": urgency,  # V1: Urgency = closure pressure
+            "coherence_factor": 0.1 * urgency,  # V1: Urgency affects coherence
         })
 
     # 3. Add previous workspace items with decayed activation (attentional inertia)

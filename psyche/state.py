@@ -36,7 +36,7 @@ class StateTransition:
     old_value: float
     delta: float
     new_value: float
-    source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE"]
+    source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST"]  # FIXED: Added BROADCAST
     reason: Optional[str] = None
 
 
@@ -77,14 +77,29 @@ class HariState:
             self._history_window = deque(maxlen=5)
 
     def asymptotic_update(self, current: float, delta: float, bounds: tuple = (0.0, 1.0)) -> float:
-        if delta >= 0:
-            new = current + ALPHA * delta * (1.0 - current)
-        else:
-            new = current + ALPHA * delta * current
+        """
+        Control Theory: Bounded asymptotic update.
+        Normalizes the current value to [0, 1] space to apply the delta,
+        then scales it back to the original bounds. This ensures VAD (-1, 1)
+        updates with the same asymptotic integrity as drives (0, 1).
+        """
         low, high = bounds
+        scale = high - low
+        
+        # Normalize current to [0, 1]
+        norm_current = (current - low) / scale
+        
+        # Apply delta in normalized space
+        if delta >= 0:
+            norm_new = norm_current + ALPHA * delta * (1.0 - norm_current)
+        else:
+            norm_new = norm_current + ALPHA * delta * norm_current
+        
+        # Denormalize back to original bounds
+        new = (norm_new * scale) + low
         return max(low, min(high, new))
 
-    def update(self, deltas: Dict[str, float], source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE"] = "DRIFT", reason: Optional[str] = None) -> None:
+    def update(self, deltas: Dict[str, float], source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST"] = "DRIFT", reason: Optional[str] = None) -> None:
         for key, delta in deltas.items():
             if not hasattr(self, key):
                 continue

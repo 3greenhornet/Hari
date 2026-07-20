@@ -56,8 +56,9 @@ def _build_sensory_prompt(
     state: HariState,
     recent_memories: List,
     prediction_error: float,
+    active_thread_context: Optional[str] = None,
 ) -> str:
-    return f"""You are Hari. This is your private inner monologue – no one sees this but you.
+    prompt = f"""You are Hari. This is your private inner monologue – no one sees this but you.
 
 Your current internal state:
 {state.to_prompt_context()}
@@ -66,23 +67,19 @@ Prediction error (surprise): {prediction_error:.3f} (0=expected, 1=surprising)
 
 Recent memories (from similarity search):
 {_format_memories(recent_memories)}
+"""
 
+    if active_thread_context:
+        prompt += f"""
+Current Active Cognitive Thread:
+{active_thread_context}
+Analyze the conversation trajectory relative to this active thread.
+"""
+
+    prompt += f"""
 User just said: "{user_input}"
 
 Output ONLY a JSON object with these fields:
-Dynamic candidates are NOT abstract topics or discussion points.
-They are **conversational actions** Hari can perform right now.
-
-Bad examples:
-- "Explore the concept of self-introduction"
-- "Discuss casual conversation"
-
-Good examples:
-- "Introduce yourself to Anand"
-- "Keep the tone casual and friendly"
-- "Notice the sudden topic change and react naturally"
-- "Stop explaining and just react"
-- "Tell a random observation"
 
 - perceived_user_intent: one of curious, avoiding, testing, help_seeking, sharing, derailing
 - intent_confidence: float 0.0-1.0
@@ -90,16 +87,22 @@ Good examples:
 - user_engagement_estimate: float 0.0-1.0
 - interruption_severity: float 0.0-1.0 (0=none, 1=complete derailment)
 - dynamic_candidates: list of {{"content": str, "item_type": one of memory/hypothesis/curiosity_node/narrative_thread/open_thought, "urgency": float}}
-- curiosity_trigger: optional string (a new question)
+- curiosity_trigger: optional string
 - hypothesis_update: optional string
 - self_belief_update: optional string
 - triggered_memory_summary: optional string
 - memory_significance: float 0.0-1.0
 - memory_emotional_tone: neutral, positive, negative, curious, frustrated
 
+# Ticket 014: Conversation trajectory analysis
+- trajectory_deviation: float 0.0-1.0 (0.0 = continuing current thread, 1.0 = complete departure)
+- trajectory_confidence: float 0.0-1.0 (how confident are you in the deviation estimate)
+- referenced_thread_id: string or null (the ID of the thread being deviated from, if any)
+
 Be honest. This is your inner voice.
 Output valid JSON only, no extra text.
 """
+    return prompt
 
 
 def _default_sensory_output() -> MonologueOutput:
@@ -110,6 +113,16 @@ def _default_sensory_output() -> MonologueOutput:
         thematic_continuity=0.8,
         user_engagement_estimate=0.5,
         interruption_severity=0.0,
+        trajectory_deviation=0.0,
+        trajectory_confidence=0.0,
+        referenced_thread_id=None,
+        dynamic_candidates=[],
+        curiosity_trigger=None,
+        hypothesis_update=None,
+        self_belief_update=None,
+        triggered_memory_summary=None,
+        memory_significance=0.5,
+        memory_emotional_tone="neutral",
     )
 
 
@@ -118,12 +131,13 @@ async def run_monologue(
     state: HariState,
     recent_memories: List,
     prediction_error: float = 0.0,
+    active_thread_context: Optional[str] = None,
 ) -> MonologueOutput:
     """
     Sensory monologue extraction engine.
     Uses unified LiteLLM cascades to handle provider outages and rate limits safely.
     """
-    prompt = _build_sensory_prompt(user_input, state, recent_memories, prediction_error)
+    prompt = _build_sensory_prompt(user_input, state, recent_memories, prediction_error, active_thread_context)
 
     messages = [
         {

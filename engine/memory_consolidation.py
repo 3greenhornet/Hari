@@ -32,7 +32,7 @@ __all__ = [
     "run_consolidation",
     "archive_old_memories",
     "promote_to_hypothesis",
-
+    "decay_memory_significance",
 ]
 
 # ============================================
@@ -220,6 +220,12 @@ async def store_hypothesis(hypothesis: Hypothesis, hypothesis_type: str) -> None
     supporting_ids = hypothesis.supporting_event_ids or []
     contradicting_ids = hypothesis.contradicting_event_ids or []
 
+    # Convert to naive datetime for database compatibility
+    if hypothesis.last_updated.tzinfo is not None:
+        naive_last_updated = hypothesis.last_updated.replace(tzinfo=None)
+    else:
+        naive_last_updated = hypothesis.last_updated
+
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO hypotheses (type, statement, confidence, supporting_event_ids, contradicting_event_ids, last_updated)
@@ -233,8 +239,7 @@ async def store_hypothesis(hypothesis: Hypothesis, hypothesis_type: str) -> None
                     END,
                 last_updated = EXCLUDED.last_updated
         """, hypothesis_type, hypothesis.statement, hypothesis.confidence,
-           supporting_ids, contradicting_ids, hypothesis.last_updated)
-
+           supporting_ids, contradicting_ids, naive_last_updated)
 
 # ============================================
 # Memory Archival (Content‑Adaptive)
@@ -347,6 +352,42 @@ async def archive_old_memories(session_id: str, older_than_days: int = ARCHIVE_O
 
         return archived_count
 
+async def decay_memory_significance(session_id: str, current_turn: int) -> int:
+    """
+    Primitive 19: Retrieval-aware forgetting.
+
+    Uses turn-based math (fast, no SQL datetime extraction).
+    Protects memories retrieved in the last N turns.
+    """
+    from db.connection import get_pool
+    from engine.cognitive_params import FORGETTING
+
+    pool = await get_pool()
+    if not pool:
+        return 0
+
+    try:
+        async with pool.acquire() as conn:
+            protection_threshold = current_turn - FORGETTING.recency_protection_turns
+
+            result = await conn.execute("""
+                UPDATE memories
+                SET significance = significance * $1
+                WHERE session_id = $2
+                  AND (last_retrieved_turn IS NULL OR last_retrieved_turn < $3)
+                  AND significance > $4
+                RETURNING id
+            """, FORGETTING.base_decay_factor, session_id, protection_threshold, FORGETTING.significance_floor)
+
+            count = int(result.split(" ")[1]) if result else 0
+            if count > 0:
+                logger.debug(f"Decayed significance for {count} memories (factor: {FORGETTING.base_decay_factor}).")
+            return count
+    except Exception as e:
+        logger.error(f"Failed to decay memory significance: {e}")
+        return 0
+
+
 # ============================================
 # Periodic Consolidation (called from worker)
 # ============================================
@@ -366,6 +407,7 @@ async def run_consolidation(session_id: str, turn_count: int) -> Dict[str, Any]:
         "status": "success",
         "promoted_hypotheses": 0,
         "archived_memories": 0,
+        "decayed_memories": 0,
         "errors": []
     }
 
@@ -418,6 +460,10 @@ async def run_consolidation(session_id: str, turn_count: int) -> Dict[str, Any]:
         archived = await archive_old_memories(session_id, ARCHIVE_OLDER_THAN_DAYS)
         results["archived_memories"] = archived
 
+        # 3. Decay significance (Primitive 19: Forgetting)
+        decayed = await decay_memory_significance(session_id, turn_count)
+        results["decayed_memories"] = decayed
+
     except Exception as e:
         results["status"] = "error"
         results["errors"].append(str(e))
@@ -430,6 +476,7 @@ async def run_consolidation(session_id: str, turn_count: int) -> Dict[str, Any]:
         "turn_count": turn_count,
         "promoted_hypotheses": results["promoted_hypotheses"],
         "archived_memories": results["archived_memories"],
+        "decayed_memories": results["decayed_memories"],
         "error_count": len(results["errors"])
     }))
 

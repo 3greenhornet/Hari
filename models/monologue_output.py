@@ -20,7 +20,7 @@ class MonologueOutput(BaseModel):
     """Pure sensory report – no internal decisions, only perceptions."""
 
     # User intent perception
-    perceived_user_intent: Literal["curious", "avoiding", "testing", "help_seeking", "sharing", "derailing"] = Field(
+    perceived_user_intent: Literal["curious", "avoiding", "testing", "help_seeking", "sharing", "derailing", "disagreeing"] = Field(
         default="sharing"
     )
     intent_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -54,6 +54,24 @@ class MonologueOutput(BaseModel):
     triggered_memory_summary: Optional[str] = None
     memory_significance: float = Field(default=0.5, ge=0.0, le=1.0)
     memory_emotional_tone: Literal["neutral", "positive", "negative", "curious", "frustrated"] = "neutral"
+
+    # Ticket 014: Conversation trajectory analysis
+    trajectory_deviation: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="0.0 = continuing current thread, 1.0 = complete departure from active thread"
+    )
+    trajectory_confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the trajectory deviation estimate"
+    )
+    referenced_thread_id: Optional[str] = Field(
+        default=None,
+        description="ID of the thread the user appears to be deviating from (if any)"
+    )
 
     def has_substantive_changes(self) -> bool:
         return (

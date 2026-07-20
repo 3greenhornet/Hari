@@ -35,7 +35,7 @@ from models.hypothesis import Hypothesis
 from engine.events import EventLogger
 from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibration
 from engine.attention_instrumentation import AttentionInstrumentation
-
+from engine.social_cognition import interpret_turn_and_update_state
 
 
 
@@ -208,6 +208,25 @@ class TurnPipeline:
             query=user_input,
             count=len(candidates)
         )
+
+        # Ticket 014: Fetch active threads ONCE for trajectory context
+        active_thread_context_str = None
+        self._active_threads = []
+        try:
+            narrative_mgr = NarrativeManager(self.session_id)
+            self._active_threads = await narrative_mgr.load_active_threads(turn_count, limit=1)
+            if self._active_threads:
+                thread = self._active_threads[0]
+                questions = ", ".join(thread.open_questions) if thread.open_questions else "None"
+                active_thread_context_str = (
+                    f"Thread ID: {thread.id}\n"
+                    f"Topic: {thread.title}\n"
+                    f"Description: {thread.description}\n"
+                    f"Open Questions: {questions}"
+                )
+        except Exception as e:
+            logger.debug(f"Could not get active thread context: {e}")
+
         # Snapshot state before any mutation (for DecisionTrace)
         drives_snapshot_before = {
             "care": self.state.care,
@@ -222,12 +241,61 @@ class TurnPipeline:
         }
         self._event_logger.log_state_snapshot(self.state)
 
-        # Step 3: Run monologue (sensory perception) – pass surprise as prediction_error
+        # Step 3: Run monologue with trajectory context
         monologue_output = await run_monologue(
-            user_input, self.state, candidates, prediction_error=surprise
+            user_input,
+            self.state,
+            candidates,
+            prediction_error=surprise,
+            active_thread_context=active_thread_context_str,
         )
         logger.info(f"MONOLOGUE_RAW: {monologue_output.model_dump_json(indent=2)}")
         self._event_logger.log_monologue_output(monologue_output)
+
+        # Ticket 015: Social interpretation synthesis
+        try:
+            await interpret_turn_and_update_state(
+                user_input=user_input,
+                state=self.state,
+                monologue_output=monologue_output,
+                recent_history=self.history,
+                turn_count=turn_count,
+                relational_manager=self.relational_manager if hasattr(self, 'relational_manager') else None
+            )
+        except Exception as e:
+            logger.warning(f"Social interpretation failed: {e}")
+
+        # Ticket 014: Wire trajectory deviation into state AND Workspace
+        deviation = monologue_output.trajectory_deviation
+        confidence = monologue_output.trajectory_confidence
+
+        # 1. Continuous State Update (No hard thresholds)
+        # Only update if confidence > 0.3 to prevent low-confidence noise
+        # Continuous: no gate, just scale by deviation × confidence
+        effective_signal = deviation * confidence
+
+        if effective_signal > 0.01:
+            self.state.update({
+                "social_ambiguity": effective_signal * 0.3,
+                "completion": effective_signal * 0.2,
+                "cognitive_tension": effective_signal * 0.1
+            }, source="MONOLOGUE", reason="trajectory_deviation")
+
+        # 2. Workspace Candidate Injection (with threshold for admission)
+        if deviation > 0.2 and confidence > 0.3:
+            urgency = deviation * confidence
+            thread_ref = monologue_output.referenced_thread_id or "active thread"
+            self._trajectory_candidate = {
+                "id": f"trajectory_{turn_count}",
+                "content": f"Conversation trajectory deviated from thread: {thread_ref} (deviation: {deviation:.2f}, confidence: {confidence:.2f})",
+                "urgency": urgency,
+                "item_type": "open_thought"
+            }
+        else:
+            self._trajectory_candidate = None
+
+        if deviation > 0.3 and confidence > 0.4:
+            logger.info(f"Trajectory deviation detected: {deviation:.2f} (confidence: {confidence:.2f})")
 
         if monologue_output.self_belief_update:
             await SelfBeliefManager.store(self.session_id, monologue_output.self_belief_update)
@@ -396,6 +464,10 @@ class TurnPipeline:
 
         # Natural drift (grace already updated earlier)
         self.state.natural_drift()
+                # Primitive 19: Apply relational decay (very slow drift)
+        # Primitive 19: Apply relational decay (very slow drift)
+        if hasattr(self, 'relational_manager'):
+            self.relational_manager.apply_relational_decay()
 
         # Log workspace telemetry with trace_id if provided
         if trace_id:
@@ -496,13 +568,16 @@ class TurnPipeline:
         except Exception as e:
             logger.debug(f"Curiosity graph not available (non-critical): {e}")
 
-        # 4. Prepare narrative threads – using YOUR method name
+        # 4. Prepare narrative threads – using stored threads (Ticket 014: fetch once)
         narrative_threads: List[NarrativeThread] = []
-        try:
-            narrative_mgr = NarrativeManager(self.session_id)
-            narrative_threads = await narrative_mgr.load_active_threads(current_turn)
-        except Exception as e:
-            logger.debug(f"Narrative manager not ready: {e}")
+        if hasattr(self, "_active_threads") and self._active_threads:
+            narrative_threads = self._active_threads
+        else:
+            try:
+                narrative_mgr = NarrativeManager(self.session_id)
+                narrative_threads = await narrative_mgr.load_active_threads(current_turn)
+            except Exception as e:
+                logger.debug(f"Narrative manager not ready: {e}")
 
         # 5. Open threads – based on completion pressure
         open_threads: List[Dict] = []
@@ -513,6 +588,10 @@ class TurnPipeline:
                 "urgency": self.state.completion,
                 "item_type": "open_thread"
             })
+
+        # Ticket 014: Inject trajectory candidate if detected
+        if hasattr(self, "_trajectory_candidate") and self._trajectory_candidate:
+            open_threads.append(self._trajectory_candidate)
 
         # 6. Previous workspace items for inertia
         if not hasattr(self, "_previous_workspace"):
