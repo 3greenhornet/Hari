@@ -58,7 +58,8 @@ async def run_observatory():
             dialogue = result["dialogue"]
             print(f"User: {user_input}")
             print(f"Hari: {dialogue}")
-            await asyncio.sleep(3)
+            # CRITICAL: Prevent Groq TPM rate limits
+            await asyncio.sleep(13)
     
     # End session
     pipeline._event_logger.log_session_end()

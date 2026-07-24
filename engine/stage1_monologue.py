@@ -10,6 +10,7 @@ import logging
 from typing import List, Optional, Any
 
 from litellm import acompletion
+from pydantic import ValidationError
 from psyche.state import HariState
 from models.monologue_output import MonologueOutput
 
@@ -86,7 +87,12 @@ Output ONLY a JSON object with these fields:
 - thematic_continuity: float 0.0-1.0 (0=complete rupture, 1=seamless)
 - user_engagement_estimate: float 0.0-1.0
 - interruption_severity: float 0.0-1.0 (0=none, 1=complete derailment)
-- dynamic_candidates: list of {{"content": str, "item_type": one of memory/hypothesis/curiosity_node/narrative_thread/open_thought, "urgency": float}}
+- dynamic_candidates: list of objects. Each object MUST have EXACTLY these fields:
+  - "content": string (the conversational action or thought)
+  - "item_type": string (MUST be exactly one of: "memory", "hypothesis", "curiosity_node", "narrative_thread", "open_thought", "self_belief_update")
+  - "urgency": float (0.0-1.0)
+  
+  Do NOT invent new item_type values. If no category clearly applies, use "open_thought".
 - curiosity_trigger: optional string
 - hypothesis_update: optional string
 - self_belief_update: optional string
@@ -105,16 +111,16 @@ Output valid JSON only, no extra text.
     return prompt
 
 
-def _default_sensory_output() -> MonologueOutput:
-    """Fallback when provider fails."""
+def _default_sensory_output(prediction_error: float = 0.5) -> MonologueOutput:
+    """Fallback when provider fails. Uses prediction error to keep state moving."""
     return MonologueOutput(
         perceived_user_intent="sharing",
         intent_confidence=0.5,
-        thematic_continuity=0.8,
+        thematic_continuity=max(0.0, 1.0 - prediction_error),
         user_engagement_estimate=0.5,
-        interruption_severity=0.0,
-        trajectory_deviation=0.0,
-        trajectory_confidence=0.0,
+        interruption_severity=prediction_error,
+        trajectory_deviation=prediction_error,
+        trajectory_confidence=0.3,
         referenced_thread_id=None,
         dynamic_candidates=[],
         curiosity_trigger=None,
@@ -155,26 +161,41 @@ async def run_monologue(
         try:
             # Base parameters
             kwargs = {"model": model, "messages": messages, "temperature": 0.2, "timeout": 3}
-
-            # Use native JSON response format where supported (skip for OpenRouter free)
             if not model.startswith("openrouter"):
                 kwargs["response_format"] = {"type": "json_object"}
 
             response = await acompletion(**kwargs)
             raw_payload = response.choices[0].message.content
-
-            # Clean conversational text drift away from the JSON object structural targets
             clean_json_str = _extract_json_safely(raw_payload)
 
-            # Validate output data structures natively using your Pydantic architecture
+            # Try to parse
             output = MonologueOutput.model_validate_json(clean_json_str)
             logger.info(f"Sensory Monologue successfully generated via platform model: {model}")
             return output
 
+        except ValidationError as provider_err:
+            logger.warning(f"Validation error on {model}, retrying with stricter prompt...")
+            try:
+                retry_messages = messages + [
+                    {"role": "system", "content": "Previous response violated the JSON schema. Regenerate using ONLY the allowed item_type values. Do not invent new values."}
+                ]
+                retry_kwargs = {"model": model, "messages": retry_messages, "temperature": 0.1, "timeout": 3}
+                if not model.startswith("openrouter"):
+                    retry_kwargs["response_format"] = {"type": "json_object"}
+
+                retry_response = await acompletion(**retry_kwargs)
+                retry_raw = retry_response.choices[0].message.content
+                retry_clean = _extract_json_safely(retry_raw)
+                output = MonologueOutput.model_validate_json(retry_clean)
+                logger.info(f"Retry successful on {model}")
+                return output
+            except Exception as retry_err:
+                logger.warning(f"Retry failed on {model}: {retry_err}")
+                continue
         except Exception as provider_err:
             logger.warning(f"Sensory pipeline stage 1 anomaly on model '{model}': {provider_err}")
-            continue  # Try next model in cascade
+            continue
 
-    # Absolute fallback boundary logic protecting the pipeline execution clock
+    # Absolute fallback
     logger.critical("CRITICAL SUBSTRATE FAULT: All Monologue infrastructure providers exhausted. Issuing emergency defaults.")
-    return _default_sensory_output()
+    return _default_sensory_output(prediction_error)

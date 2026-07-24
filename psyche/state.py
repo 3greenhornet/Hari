@@ -36,7 +36,7 @@ class StateTransition:
     old_value: float
     delta: float
     new_value: float
-    source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST"]  # FIXED: Added BROADCAST
+    source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST"]
     reason: Optional[str] = None
 
 
@@ -65,6 +65,7 @@ class HariState:
     uncertainty: float = 0.0
     social_ambiguity: float = 0.0
     cognitive_tension: float = 0.0
+    presence: float = 0.0  # Sprint 2.0A: Ability to "be" without performing
 
     # Telemetry and history (excluded from serialisation)
     _transitions: List[StateTransition] = field(default_factory=list, repr=False, init=False)
@@ -80,21 +81,20 @@ class HariState:
         """
         Control Theory: Bounded asymptotic update.
         Normalizes the current value to [0, 1] space to apply the delta,
-        then scales it back to the original bounds. This ensures VAD (-1, 1)
-        updates with the same asymptotic integrity as drives (0, 1).
+        then scales it back to the original bounds.
         """
         low, high = bounds
         scale = high - low
-        
+
         # Normalize current to [0, 1]
         norm_current = (current - low) / scale
-        
+
         # Apply delta in normalized space
         if delta >= 0:
             norm_new = norm_current + ALPHA * delta * (1.0 - norm_current)
         else:
             norm_new = norm_current + ALPHA * delta * norm_current
-        
+
         # Denormalize back to original bounds
         new = (norm_new * scale) + low
         return max(low, min(high, new))
@@ -175,6 +175,15 @@ class HariState:
     def completion_pressure(self) -> float:
         """Derived pressure: base completion + small velocity contribution."""
         return min(1.0, self.completion + (self.get_velocity("completion") * 0.2))
+
+    @property
+    def economy_pressure(self) -> float:
+        """
+        Economy of Presence: Only activates when rest is high AND engagement is low.
+        """
+        rest_excess = max(0.0, self.rest - 0.4)
+        disengagement_excess = max(0.0, (1.0 - self.engagement) - 0.5)
+        return min(1.0, (rest_excess + disengagement_excess) / 1.1)
 
     def get_transition_log(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [t.__dict__ for t in self._transitions[-limit:]]

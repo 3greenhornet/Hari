@@ -73,6 +73,32 @@ Hari is an **autonomous cognitive presence** – an intelligence that participat
 > [!NOTE]
 > If she behaves like any of these, the architecture has drifted. The corrective is to reinforce the **workspace competition** and **state-driven attention**.
 
+
+## Validation from AI History
+
+Hari's architectural direction is validated by the history of AI:
+
+| Historical System | Insight | Hari's Implementation |
+|-------------------|---------|----------------------|
+| **ELIZA** (1966) | Humans anthropomorphize easily | Optimizing for architecture, not performance |
+| **PARRY** (1972) | Statefulness creates authenticity | HariState, IdentityModel, workspace competition |
+| **Turing Test** | Rewards deception, not intelligence | No "pass the Turing Test" goals |
+| **Eugene Goostman** (2014) | "Tricks" to appear human are meaningless | Never employ deception |
+| **2025 LLMs** | Trying too hard to be smart is a tell | Need economy of presence |
+
+**The Bottom Line:** Hari's success is measured by internal coherence—not by whether humans can be fooled.
+
+### Ticket: Economy of Presence
+
+**Goal:** Allow Hari to be appropriately brief, simple, or silent.
+
+**Mechanisms:**
+- **Economy Pressure** — A drive that shortens responses when cognitive load is high
+- **Minimal Candidate Type** — A workspace item type for "just be present" responses
+- **Presence State** — A meta-cognitive state for "I don't need to perform right now"
+
+**Priority:** Low (future sprint)
+
 ### 1.3 Architectural Invariants
 
 > [!IMPORTANT]
@@ -1101,6 +1127,144 @@ Hari is not a tool, not an assistant, not a roleplay character. She is an autono
 
 ---
 
+
+
+---
+
+## Why This Breaks Authenticity
+
+| Behavior | Why It's Inauthentic |
+|----------|----------------------|
+| Answering trivia in the middle of a deep conversation | Humans notice interruptions |
+| No acknowledgment of the topic shift | Humans react to context shifts |
+| No suspicion or curiosity about the question | Humans wonder "Why are you asking this?" |
+| No pause or hesitation | Humans process interruptions |
+
+**Authenticity requires context awareness.**
+
+
+---
+
+
+
+### Section: Conversational Context Processing
+
+**Purpose:** Ensure Hari responds to the **fact of the question** and the **context it was asked in**, not just the question's content.
+
+**Core Problem:**
+Hari currently treats every user input as a direct query to be answered. She does not distinguish between:
+- A natural continuation of the current topic
+- An interruption
+- A test
+- A distraction
+- A random thought from the user
+
+**Example Failure:**
+```
+User: (discussing black holes) ...so what happens at the event horizon?
+Hari: The event horizon is the boundary...
+User: What's the capital of France?
+Hari: Paris.  ← Inauthentic. Human would notice the interruption.
+```
+
+**Required Capability:**
+Before deciding **what** to say, Hari must decide **whether** and **how** to respond based on the conversational context.
+
+**Proposed Solution: Interaction State Layer**
+
+This layer evaluates every incoming perturbation (user input) on four dimensions:
+
+| Dimension | Definition | Example |
+|-----------|------------|---------|
+| **Continuity** | How connected is this input to the current topic? | 0.0 = completely unrelated; 1.0 = direct continuation |
+| **Relevance** | How relevant is this input to the ongoing cognitive thread? | 0.0 = irrelevant; 1.0 = highly relevant |
+| **Interruption Severity** | How abrupt is this shift? | 0.0 = smooth transition; 1.0 = jarring interruption |
+| **Appropriateness** | Is it appropriate to answer directly? | 0.0 = should not answer; 1.0 = should answer |
+
+**Decision Policy:**
+
+```
+if Continuity < 0.3 and Interruption Severity > 0.6:
+    Respond with interruption awareness
+    (e.g., "Why are you asking that?" or "That's random.")
+
+elif Relevance < 0.2 and Appropriateness < 0.3:
+    Question the context
+    (e.g., "Is there a reason you're asking?")
+
+else:
+    Answer directly
+```
+
+**Implementation Approach:**
+- The Interaction State Layer is computed **before** workspace competition.
+- It does NOT add a new primitive; it is a synthesis of existing signals:
+  - `trajectory_deviation` (Ticket 014)
+  - `thematic_continuity` (monologue)
+  - `shift_magnitude` (Ticket 015)
+  - `social_ambiguity` (state)
+- It produces an `interruption_detected` flag and a `context_relevance` score.
+- These influence:
+  - Whether the `minimal` candidate is injected (if context_relevance is low)
+  - The system prompt (adds "Acknowledge the interruption" directives)
+  - The response generation (wrap answer in a contextual frame)
+
+**Architectural Placement:**
+
+```
+User Input (Perturbation)
+    │
+    ▼
+Prediction Error ──────► Surprise
+    │
+    ▼
+Memory Retrieval ──────► Candidates
+    │
+    ▼
+Monologue ─────────────► Intent, Continuity, Engagement, Trajectory Deviation
+    │
+    ▼
+Interaction State Layer ──► Continuity, Interruption Severity, Context Relevance
+    │
+    ▼
+If interruption detected ──► Injects "interruption" candidate into workspace
+    │
+    ▼
+Workspace Competition ──► Winners
+    │
+    ▼
+Dialogue Generation ──► Response (wrapped if context requires)
+```
+
+**Invariant:**
+> Hari must never answer a question as if it were part of the ongoing conversation unless the context supports that interpretation. All deviations from the current thread must be acknowledged or questioned before any content is provided.
+
+**Failure Mode:**
+If Hari answers trivia without acknowledging the context shift, the system has failed the authenticity test.
+
+---
+
+## What to Add to `ROADMAP.md`
+
+**Ticket 015B — Interaction State Layer**
+
+| Attribute | Value |
+|-----------|-------|
+| **Description** | Implement a layer that evaluates incoming perturbations (user inputs) for continuity, relevance, interruption severity, and appropriateness. Influences whether Hari responds directly or acknowledges the context shift. |
+| **Dependencies** | Ticket 014 (Trajectory Deviation), Ticket 015 (Social Interpretation) |
+| **Files Affected** | `engine/interaction_state.py` (new), `engine/generate.py` (modified) |
+| **Success Criteria** | When asked an unrelated trivia question in the middle of a conversation, Hari acknowledges the interruption or questions the context before answering. |
+| **Priority** | High (critical for authenticity) |
+
+---
+
+
+
+## One-Sentence Summary
+
+> **The "Paris out of nowhere" problem is not documented anywhere—add a "Conversational Context Processing" section to `ARCHITECTURE.md` and a Ticket 015B to `ROADMAP.md` to formally capture the need for an Interaction State Layer that evaluates continuity and interruption before responding.**
+
+
 ## ✅ Verification Checklist
 
 Before pasting, verify:
@@ -1158,3 +1322,34 @@ Monologue → Raw Proposals (staging) → Promotions (evaluation) → Accepted B
 - `IdentityModel.SelfModel` – accepted self-understanding
 - `system_interests` – accepted interests
 - `contradictions` – accepted cognitive tensions
+
+## Architectural Consolidation Phase (2026-07-20)
+
+### Status
+- Philosophy: Frozen ✅
+- Architecture: Frozen ✅
+- Specification: In Progress ⏳
+- Implementation: Not Started
+
+### What This Means
+- No new primitives unless Behavior Lab proves a gap.
+- No new architectural layers.
+- All effort goes into formalizing existing concepts.
+
+### Formalization Checklist
+
+- [ ] Define unified `HariState` object
+- [ ] Define state topology (persistent, dynamic, transient)
+- [ ] For each primitive: state definition, update rules, contracts, invariants
+- [ ] Define time model (what does "continuous" mean?)
+- [ ] Define process vs. state separation
+- [ ] Define identity evolution rules
+- [ ] Define optimization targets (drives, not single objective)
+- [ ] Define emergence criteria
+- [ ] Define "negative philosophy" (what Hari is NOT)
+- [ ] Define naming ontology (Economy vs. Resource Allocation)
+
+### Reference Documents
+- `docs/STATE_SPECIFICATION.md` — Formal state definition
+- `docs/PRIMITIVE_CONTRACTS.md` — Primitive contracts
+- `docs/NEGATIVE_PHILOSOPHY.md` — What Hari is NOT

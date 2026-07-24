@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 import os
+import numpy as np
 
 from engine.attention_config import AttentionCalibration
 
@@ -32,15 +33,28 @@ class PressureLogEntry:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     
     def to_dict(self) -> Dict[str, Any]:
+        def convert(value):
+            """Recursively convert numpy types to Python primitives."""
+            if isinstance(value, (np.float32, np.float64)):
+                return float(value)
+            elif isinstance(value, (np.int32, np.int64)):
+                return int(value)
+            elif isinstance(value, dict):
+                return {k: convert(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                return [convert(v) for v in value]
+            else:
+                return value
+
         return {
             "experiment_id": self.experiment_id,
             "turn": self.turn_number,
             "candidate_id": self.candidate_id,
             "candidate_type": self.candidate_type,
-            "pressures": self.pressures,
-            "weights": self.weights,
-            "raw_score": self.raw_score,
-            "final_score": self.final_score,
+            "pressures": convert(self.pressures),
+            "weights": convert(self.weights),
+            "raw_score": float(self.raw_score),
+            "final_score": float(self.final_score),
             "was_selected": self.was_selected,
             "timestamp": self.timestamp
         }

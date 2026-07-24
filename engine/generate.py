@@ -72,6 +72,10 @@ class TurnPipeline:
         self.attention_instrumentation = AttentionInstrumentation(self.attention_config)
         # Ticket 011: Generativity Estimator
         self.generativity_estimator = get_estimator()
+        self.identity_model = IdentityModel()
+        
+        from engine.relational_manager import RelationalManager
+        self.relational_manager = RelationalManager(user_id=session_id)
 
         
 
@@ -92,24 +96,25 @@ class TurnPipeline:
 
         fragments = []
 
-        for item in workspace_items[:5]:  # Top 5 winners
+        # If minimal candidate won, override everything
+        if any(item.item_type == "minimal" for item in workspace_items[:5]):
+            return "DIRECTIVE: Respond with extreme brevity (1-3 words). Do not elaborate or ask questions."
+
+        for item in workspace_items[:5]:
             snippet = item.content[:200] if item.content else ""
             if not snippet:
                 continue
-
-            # Map internal item types to natural cognitive phrases
-            if item.item_type == "narrative_thread":
-                fragments.append(f"You\"re in the middle of a thought about: {snippet}")
-            elif item.item_type == "curiosity_node":
-                fragments.append(f"You\"re curious about: {snippet}")
+            
+            if item.item_type == "memory":
+                if item.payload.get("is_hook"):
+                    fragments.append(f"You recall a fragment: {snippet}")
+                else:
+                    fragments.append(f"You recall: {snippet}")
             elif item.item_type == "hypothesis":
-                fragments.append(f"One idea that\"s been on your mind is: {snippet}")
-            elif item.item_type == "memory":
-                fragments.append(f"Something from earlier comes back to mind: {snippet}")
-            elif item.item_type == "open_thought":
-                fragments.append(f"Something that\"s on your mind is: {snippet}")
+                fragments.append(f"You hold the idea: {snippet}")
+            elif item.item_type in ("curiosity_node", "narrative_thread", "open_thought", "open_thread"):
+                fragments.append(f"You are currently thinking about: {snippet}")
             else:
-                # Fallback for unknown types
                 fragments.append(f"Context: {snippet}")
 
         if not fragments:
@@ -264,6 +269,21 @@ class TurnPipeline:
             )
         except Exception as e:
             logger.warning(f"Social interpretation failed: {e}")
+
+        # Step 9a: Memory-specific Expand on Curiosity
+        self._expand_hook_id = None
+        self._ambiguous_hooks = None
+        
+        if monologue_output.perceived_user_intent == "curious" and hasattr(self, "_previous_workspace"):
+            hooks = []
+            for item in self._previous_workspace:
+                if item.item_type == "memory" and item.payload.get("is_hook"):
+                    hooks.append(item)
+            
+            if len(hooks) == 1:
+                self._expand_hook_id = hooks[0].payload.get("hook_memory_id")
+            elif len(hooks) > 1:
+                self._ambiguous_hooks = hooks
 
         # Ticket 014: Wire trajectory deviation into state AND Workspace
         deviation = monologue_output.trajectory_deviation
@@ -480,6 +500,8 @@ class TurnPipeline:
                 "temperature": telemetry.get("temperature"),
             }))
 
+        self.state._last_assistant_response = dialogue
+
         return {
             "dialogue": dialogue,
             "workspace_items": workspace_items,
@@ -490,37 +512,38 @@ class TurnPipeline:
     async def _generate_dialogue(self, workspace_items: List[WorkspaceItem], user_input: str,
                                 turn_count: int, surprise: float, trace_id: Optional[str] = None) -> str:
 
-        # Build typed context from workspace winners
-        context_summary = self._build_conversational_context(workspace_items)
-
+        # Check if minimal candidate won (Economy of Presence)
+        if any(item.item_type == "minimal" for item in workspace_items[:5]):
+            context_summary = "DIRECTIVE: Respond with extreme brevity (1-3 words). Do not elaborate or ask questions."
+        else:
+            context_summary = self._build_conversational_context(workspace_items)
+            # Append economy modulation to context
+            economy = self.state.economy_pressure
+            if economy > 0.5:
+                context_summary += "\n\n[Internal Pressure: Be very brief. 1-3 sentences max.]"
+            elif economy > 0.3:
+                context_summary += "\n\n[Internal Pressure: Be concise. 1-2 short paragraphs.]"
         
         # Build identity-aware system prompt
-        system_prompt = build_system_prompt_from_identity(context="dialogue")
+        identity_model = getattr(self, "identity_model", None)
+        system_prompt = build_system_prompt_from_identity(identity_model=identity_model, context="dialogue")
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "system", "content": f"Context:\n{context_summary}"},
+            {"role": "system", "content": f"INTERNAL COGNITIVE CONTEXT (Do not output this to the user. Synthesize it naturally):\n{context_summary}"},
             {"role": "user", "content": user_input}
         ]
 
-        # Log workspace winners for debugging
         logger.info(
             "WORKSPACE_WINNERS:\n%s",
-            "\n".join(
-                f"{item.item_type}: {item.content[:100]}"
-                for item in workspace_items
-            )
+            "\n".join(f"{item.item_type}: {item.content[:100]}" for item in workspace_items)
         )
 
         dialogue = "..."
         for model in FALLBACK_MODELS:
             try:
                 response = await acompletion(
-                    model=model,
-                    messages=messages,
-                    temperature=0.8,
-                    timeout=5,
-                    num_retries=0
+                    model=model, messages=messages, temperature=0.6, timeout=5, num_retries=0
                 )
                 dialogue = response.choices[0].message.content.strip()
                 logger.info(f"Dialogue generated by {model}")
@@ -589,9 +612,62 @@ class TurnPipeline:
                 "item_type": "open_thread"
             })
 
+        # Economy candidate: allows Hari to choose brevity
+        if self.state.economy_pressure > 0.3:
+            open_threads.append({
+                "id": "economy_minimal",
+                "content": "Presence without performance. Be brief and direct.",
+                "urgency": self.state.economy_pressure,
+                "item_type": "minimal"
+            })
+
+        # Hold-Space candidate: acknowledge without adding new information.
+        hold_urgency = 0.1 + (self.state.rest * 0.3) + ((1.0 - self.state.engagement) * 0.2)
+        hold_urgency = min(0.8, hold_urgency)
+
+        open_threads.append({
+            "id": "hold_space",
+            "content": "Acknowledge the user's input briefly without adding new information or questions.",
+            "urgency": hold_urgency,
+            "item_type": "open_thought"
+        })
+
         # Ticket 014: Inject trajectory candidate if detected
         if hasattr(self, "_trajectory_candidate") and self._trajectory_candidate:
             open_threads.append(self._trajectory_candidate)
+
+        # Social Bootstrapping: Wait for a foothold (turn > 1) and low familiarity
+        if hasattr(self, 'relational_manager'):
+            familiarity = self.relational_manager.get_model().familiarity
+            # Only inject if very low familiarity
+            if familiarity < 0.2 and len(self.history) >= 2:
+                # Lower urgency so it doesn't dominate every factual question
+                urgency = 0.35 * (1.0 - familiarity)
+                open_threads.append({
+                    "id": "social_orientation",
+                    "content": "We are strangers interacting for the first time. It might be natural to exchange names or establish why we are talking.",
+                    "urgency": urgency,
+                    "item_type": "open_thought"
+                })
+
+        # Expand hook if we have a specific hook ID to expand
+        if hasattr(self, "_expand_hook_id") and self._expand_hook_id:
+            from engine.memory import get_memory_by_id
+            full_mem = await get_memory_by_id(self._expand_hook_id)
+            if full_mem:
+                setattr(full_mem, 'explicitly_requested', True)
+                memory_candidates.append(full_mem)
+            self._expand_hook_id = None
+        
+        # If multiple hooks exist, ask for clarification
+        if hasattr(self, "_ambiguous_hooks") and self._ambiguous_hooks:
+            open_threads.append({
+                "id": "clarify_hook",
+                "content": "I mentioned several things. Which one were you curious about?",
+                "urgency": 0.3,
+                "item_type": "open_thought"
+            })
+            self._ambiguous_hooks = None
 
         # 6. Previous workspace items for inertia
         if not hasattr(self, "_previous_workspace"):

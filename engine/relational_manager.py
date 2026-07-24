@@ -1,4 +1,3 @@
-# hari/engine/relational_manager.py
 """Per-session relational state management."""
 
 from models.relational import RelationshipModel
@@ -10,6 +9,10 @@ class RelationalManager:
     def __init__(self, user_id: str):
         self.user_id = user_id
         self.relationship = RelationshipModel(user_id=user_id)
+
+    def get_model(self):
+        """Return the current relationship model."""
+        return self.relationship
 
     def apply_relational_decay(self) -> None:
         """

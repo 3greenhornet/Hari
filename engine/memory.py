@@ -1,12 +1,15 @@
 # hari/engine/memory.py
 import os
 import uuid
+import logging
 from typing import List, Optional, Dict
 from datetime import datetime
 import numpy as np
 from google import genai
 from models.memory_event import MemoryEvent
 import math
+
+logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -260,6 +263,38 @@ async def retrieve_candidates_hybrid(
     candidates.sort(key=lambda x: x.computed_score, reverse=True)
     return candidates
 
+
+
+async def get_memory_by_id(memory_id: str) -> Optional[MemoryEvent]:
+    """Fetch a memory by ID. Used for expanding hooks."""
+    from db.connection import get_pool
+    pool = await get_pool()
+    if not pool:
+        return None
+    
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM memories WHERE id = $1", memory_id)
+            if row:
+                return MemoryEvent(
+                    id=row["id"],
+                    session_id=row["session_id"],
+                    turn_number=row["turn_number"],
+                    role=row["role"],
+                    content=row["content"],
+                    event_type=row.get("event_type"),
+                    thematic_tags=row.get("thematic_tags") or [],
+                    significance=row.get("significance", 0.5),
+                    meaning_summary=row.get("meaning_summary"),
+                    embedding=row.get("embedding"),
+                    created_at=row["created_at"],
+                    usage_count=row.get("usage_count", 0),
+                    last_retrieved_turn=row.get("last_retrieved_turn", 0),
+                    explanatory_power=row.get("explanatory_power", 0.5)
+                )
+    except Exception as e:
+        logger.error(f"Failed to fetch memory {memory_id}: {e}")
+        return None
 
 
 async def ensure_memories_table():

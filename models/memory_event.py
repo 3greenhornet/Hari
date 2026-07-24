@@ -26,3 +26,12 @@ class MemoryEvent(BaseModel):
         description="How well this memory explains conversational ruptures"
     )
     computed_score: float = Field(default=0.0, description="Dynamic score computed during hybrid retrieval")
+    
+    # Ticket 015: Incremental Storytelling (Hook mechanism)
+    # This field tracks whether the user has explicitly asked for more detail
+    # about this specific memory. When True, the full memory content is shown
+    # instead of just the hook.
+    explicitly_requested: bool = Field(
+        default=False,
+        description="True if the user explicitly asked for more detail about this memory"
+    )

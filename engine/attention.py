@@ -60,7 +60,7 @@ class WorkspaceItem:
     def __init__(
         self,
         id: str,
-        item_type: Literal["memory", "hypothesis", "curiosity_node", "narrative_thread", "open_thought"],
+        item_type: Literal["memory", "hypothesis", "curiosity_node", "narrative_thread", "open_thought","minimal"],
         source: str,                   # where it came from (engine.memory, monologue, etc.)
         payload: Dict[str, Any],       # the actual content, unchanged
         attention_weight: float = 0.0,
@@ -159,6 +159,18 @@ async def _compute_pressure_field(
         item_significance = float(candidate.get("significance", 0.5))
         shared_significance = (item_significance * 0.5) + (float(state.care) * 0.5)
     pressures["shared_significance"] = min(1.0, shared_significance)
+
+    # === Interruption / Coherence Tension Pressure ===
+    # If this candidate is an open_thought (e.g., "trajectory deviation detected"),
+    # its urgency becomes a pressure field that can override factual relevance.
+    if candidate.get("item_type") == "open_thought":
+        coherence_tension = float(candidate.get("urgency", 0.0))
+        pressures["coherence_tension"] = min(1.0, coherence_tension)
+        # When the deviation is severe, boost relevance so this thought can win
+        if coherence_tension > 0.5:
+            pressures["relevance"] = max(pressures["relevance"], coherence_tension)
+    else:
+        pressures["coherence_tension"] = 0.0
 
     return pressures
 
@@ -354,18 +366,29 @@ async def load_workspace(
 
     # Add memories
     for mem in memories:
-        # V1 Proxy: Memory significance contributes to coherence
         significance = getattr(mem, "significance", 0.5)
-        add_candidate("memory", mem.id, {
+        
+        # Base payload
+        payload = {
             "content": mem.content,
             "embedding": getattr(mem, "embedding", None),
             "significance": significance,
             "id": mem.id,
-            # Ecology Signals (Ticket 013)
-            "information_gap": 0.0,  # V1: Memories don't create new uncertainty
-            "closure_pressure": 0.0,  # V1: Memories don't demand resolution
-            "coherence_factor": 0.1 * significance,  # V1: Significance contributes to coherence
-        })
+            # Ecology Signals
+            "information_gap": 0.0,
+            "closure_pressure": 0.0,
+            "coherence_factor": 0.1 * significance,
+            "valence_delta": 0.0 # Ensure valence is present
+        }
+        
+        # Hook logic: If memory is highly significant and not explicitly requested, only inject the hook
+        if significance > 0.7 and not getattr(mem, 'explicitly_requested', False):
+            hook_text = f"I remember a story about {getattr(mem, 'meaning_summary', 'something relevant')[:50]}..."
+            payload["is_hook"] = True
+            payload["hook_memory_id"] = mem.id
+            payload["content"] = hook_text
+        
+        add_candidate("memory", mem.id, payload)
     # Add hypotheses
     for hyp in hypotheses:
         extracted_text = (hyp.get("content") or hyp.get("statement") or "").strip()
@@ -474,6 +497,14 @@ async def load_workspace(
             turn_number=current_turn,
             previous_engagement=state.engagement
         )
+
+        # Repetition Suppression Field
+        if hasattr(state, '_last_assistant_response') and state._last_assistant_response:
+            resp_words = set(state._last_assistant_response.lower().split())
+            cand_words = set(payload.get("content", "").lower().split())
+            overlap = len(resp_words.intersection(cand_words)) / max(len(resp_words), 1)
+            if overlap > 0.4:          # >40% word overlap with last response
+                total_salience *= 0.2   # 80% penalty
         
         # Memory fatigue and explanatory power
         usage_count = payload.get("usage_count", 0)
