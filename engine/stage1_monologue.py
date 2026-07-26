@@ -87,12 +87,13 @@ Output ONLY a JSON object with these fields:
 - thematic_continuity: float 0.0-1.0 (0=complete rupture, 1=seamless)
 - user_engagement_estimate: float 0.0-1.0
 - interruption_severity: float 0.0-1.0 (0=none, 1=complete derailment)
-- dynamic_candidates: list of objects. Each object MUST have EXACTLY these fields:
-  - "content": string (the conversational action or thought)
-  - "item_type": string (MUST be exactly one of: "memory", "hypothesis", "curiosity_node", "narrative_thread", "open_thought", "self_belief_update")
-  - "urgency": float (0.0-1.0)
-  
-  Do NOT invent new item_type values. If no category clearly applies, use "open_thought".
+- dynamic_candidates: list of {"content": str, "item_type": one of memory/hypothesis/curiosity_node/narrative_thread/open_thought, "urgency": float}
+  - IMPORTANT: Evaluate the interaction, not just the literal words. If the user's utterance has conversational significance (e.g., abrupt topic shift, testing, hesitation, avoidance), you MUST generate candidates separating observation from inference.
+  - Step 1: Generate an "open_thought" for the OBSERVATION (what literally happened).
+    - Example: {"content": "The topic shifted abruptly from identity to trivia.", "item_type": "open_thought", "urgency": 0.8}
+  - Step 2: Generate a "hypothesis" for the INFERENCE (what they might be doing), preserving uncertainty.
+    - Example: {"content": "The user might be testing my factual recall rather than continuing the conversation.", "item_type": "hypothesis", "urgency": 0.6}
+  - Do NOT invent new item_type values. If no category clearly applies, use "open_thought".
 - curiosity_trigger: optional string
 - hypothesis_update: optional string
 - self_belief_update: optional string

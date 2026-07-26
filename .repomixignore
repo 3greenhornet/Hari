@@ -14,7 +14,7 @@ app.py
 # Environment and config
 .env
 .env.example
-requirements.txt
+
 .gitignore
 bundle.py
 

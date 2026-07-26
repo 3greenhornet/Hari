@@ -26,8 +26,7 @@ class Desire(BaseModel):
         "curiosity", "coherence", "care", "maintenance", "completion", "rest"
     ] = Field(..., description="The intrinsic architectural drive generating this pressure")
 
-    type: Literal["understand", "resolve", "finish", "protect"] = Field(...)
-
+    type: Literal["understand", "resolve", "finish", "protect", "share", "assert_boundary"] = Field(...)
     source_tension_id: str = Field(
         ...,
         description="ID of the Contradiction, Interruption, or RelationshipTension that triggered this"

@@ -5,9 +5,12 @@ Generates desires from drive velocities (momentum) and injects proactive candida
 into the workspace competition. Includes "desire to share perspective" as a new type.
 """
 
+import logging
 from typing import List, Dict, Any
 from models.volition import Desire, Agenda, ActiveProject
 import uuid
+
+logger = logging.getLogger(__name__)
 
 
 class VolitionEngine:
@@ -76,6 +79,9 @@ class VolitionEngine:
             ))
 
         if state.maintenance > 0.5:
+            logger.info(
+                f"Quasi-need assert_boundary triggered (maintenance={state.maintenance:.2f})"
+            )
             self._desires.append(Desire(
                 desire_id=str(uuid.uuid4()),
                 parent_drive="maintenance",

@@ -60,7 +60,7 @@ class WorkspaceItem:
     def __init__(
         self,
         id: str,
-        item_type: Literal["memory", "hypothesis", "curiosity_node", "narrative_thread", "open_thought","minimal"],
+        item_type: Literal["memory", "hypothesis", "curiosity_node", "narrative_thread", "open_thought", "minimal"],
         source: str,                   # where it came from (engine.memory, monologue, etc.)
         payload: Dict[str, Any],       # the actual content, unchanged
         attention_weight: float = 0.0,
@@ -160,15 +160,11 @@ async def _compute_pressure_field(
         shared_significance = (item_significance * 0.5) + (float(state.care) * 0.5)
     pressures["shared_significance"] = min(1.0, shared_significance)
 
-    # === Interruption / Coherence Tension Pressure ===
-    # If this candidate is an open_thought (e.g., "trajectory deviation detected"),
-    # its urgency becomes a pressure field that can override factual relevance.
-    if candidate.get("item_type") == "open_thought":
+    # === Coherence Tension Pressure ===
+    # Naturally boosts thoughts/hypotheses that resolve conversational tension.
+    if candidate.get("item_type") in ("open_thought", "hypothesis"):
         coherence_tension = float(candidate.get("urgency", 0.0))
         pressures["coherence_tension"] = min(1.0, coherence_tension)
-        # When the deviation is severe, boost relevance so this thought can win
-        if coherence_tension > 0.5:
-            pressures["relevance"] = max(pressures["relevance"], coherence_tension)
     else:
         pressures["coherence_tension"] = 0.0
 
@@ -435,15 +431,20 @@ async def load_workspace(
     # Add open threads
     for ot in open_threads:
         urgency = ot.get("urgency", 0.5)
-        add_candidate("open_thought", ot.get("id", "unknown"), {
+        item_type = ot.get("item_type", "open_thought")
+        
+        # Derive coherence_factor from urgency (no type-specific rules)
+        coherence_factor = urgency * 0.6
+        
+        add_candidate(item_type, ot.get("id", "unknown"), {
             "content": ot.get("content", ""),
             "urgency": urgency,
             "id": ot.get("id"),
-            # Ecology Signals (Ticket 013)
-            "information_gap": 0.1,  # V1: Open thoughts create some uncertainty
-            "closure_pressure": urgency,  # V1: Urgency = closure pressure
-            "coherence_factor": 0.1 * urgency,  # V1: Urgency affects coherence
+            "information_gap": 0.1,
+            "closure_pressure": urgency,
+            "coherence_factor": coherence_factor,
         })
+    
 
     # 3. Add previous workspace items with decayed activation (attentional inertia)
     if previous_workspace_items:
@@ -726,7 +727,7 @@ async def load_workspace_secured(
                     thematic_tags=[],
                     significance=0.4,
                     meaning_summary=old_item.content[:100],
-                    created_at=datetime.now(),
+                    created_at=datetime.now(timezone.utc),
                     usage_count=0,
                     last_retrieved_turn=current_turn - 1,
                     explanatory_power=0.3
