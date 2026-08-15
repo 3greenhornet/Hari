@@ -391,13 +391,30 @@ async def decay_memory_significance(session_id: str, current_turn: int) -> int:
 # ============================================
 # Periodic Consolidation (called from worker)
 # ============================================
-
 async def run_consolidation(session_id: str, turn_count: int) -> Dict[str, Any]:
     """
-    Execute full consolidation cycle:
-    1. Promote high-significance memories to hypotheses (skip already promoted)
-    2. Archive old memories (content-adaptive)
-    3. Return statistics
+    Execute full consolidation cycle.
+    
+    ARCHITECTURAL CHANGE (2026-07-27):
+    This function NO LONGER creates Hypotheses or Self-Beliefs directly.
+    
+    Why:
+    - Direct SQL writes bypassed the Promotion Engine, violating Invariant 4
+      (Every persistent cognitive object must flow through Promotions).
+    - The Promotion Engine (engine/promotions.py) is now the SOLE gateway
+      for structural memory (Patterns, Contradictions, Interests, Identity).
+    
+    New Flow:
+    1. Archive old memories (content-adaptive compression).
+    2. Decay significance (Primitive 19: Forgetting).
+    3. Feed high-significance memories to promote_memory_to_pattern().
+       - The Promotion Engine handles clustering, similarity checks,
+         Pattern creation, Contradiction detection, and Curiosity spawning.
+    4. Hypotheses and Self-Beliefs are staged by generate.py and processed
+       by process_staging_proposals() in the background consolidation worker.
+    
+    The old promote_to_hypothesis() and store_hypothesis() functions are now
+    DEPRECATED and should be removed from this file.
     """
     pool = await get_pool()
     if not pool:
@@ -405,83 +422,63 @@ async def run_consolidation(session_id: str, turn_count: int) -> Dict[str, Any]:
 
     results = {
         "status": "success",
-        "promoted_hypotheses": 0,
         "archived_memories": 0,
         "decayed_memories": 0,
+        "patterns_created": 0,      # NEW: Track patterns formed by Promotion Engine
         "errors": []
     }
 
     try:
-        # 1. Find high-significance memories that haven\'t been promoted yet
-        async with pool.acquire() as conn:
-            significant_memories = await conn.fetch("""
-                SELECT id, content, role, significance, session_id, turn_number, created_at,
-                       promoted_to_hypothesis
-                FROM memories
-                WHERE significance >= $1 
-                  AND session_id = $2
-                  AND (promoted_to_hypothesis IS NULL OR promoted_to_hypothesis = FALSE)
-                ORDER BY significance DESC
-                LIMIT 20
-            """, SIGNIFICANCE_PROMOTION_THRESHOLD, session_id)
-
-            logger.info(f"CONSOLIDATION_QUERY: found {len(significant_memories)} high‑significance unpromoted memories")
-
-        for mem_data in significant_memories:
-            try:
-                memory = MemoryEvent(
-                    id=mem_data["id"],
-                    session_id=mem_data["session_id"],
-                    turn_number=mem_data["turn_number"],
-                    role=mem_data["role"],
-                    content=mem_data["content"],
-                    significance=mem_data["significance"],
-                    created_at=mem_data["created_at"],
-                    promoted_to_hypothesis=mem_data.get("promoted_to_hypothesis", False)  # pass flag
-                )
-                logger.info(f"PROMOTION_ATTEMPT: memory_id={memory.id} significance={memory.significance}")
-                hypothesis = await promote_to_hypothesis(memory)
-                if hypothesis:
-                    # The extracted type is attached as _extracted_type
-                    hypo_type = getattr(hypothesis, '_extracted_type', 'world')
-                    await store_hypothesis(hypothesis, hypo_type)
-                    results["promoted_hypotheses"] += 1
-
-                    # Mark memory as promoted
-                    async with pool.acquire() as conn:
-                        await conn.execute(
-                            "UPDATE memories SET promoted_to_hypothesis = TRUE WHERE id = $1",
-                            memory.id
-                        )
-            except Exception as e:
-                results["errors"].append(f"Memory {mem_data['id']}: {str(e)}")
-
-        # 2. Archive old memories
+        # 1. Archive old memories (content-adaptive compression)
+        #    This preserves cognitive history without cluttering live memory.
         archived = await archive_old_memories(session_id, ARCHIVE_OLDER_THAN_DAYS)
         results["archived_memories"] = archived
 
-        # 3. Decay significance (Primitive 19: Forgetting)
+        # 2. Decay significance (Primitive 19: Forgetting)
+        #    Memories that are not retrieved gradually lose importance.
         decayed = await decay_memory_significance(session_id, turn_count)
         results["decayed_memories"] = decayed
+
+        # 3. Feed high-significance memories to the Promotion Engine
+        #    This is the ONLY path for Memory → Pattern → Contradiction → Curiosity.
+        #    The Promotion Engine handles all evaluation and structural creation.
+        from engine.promotions import promote_memory_to_pattern
+
+        async with pool.acquire() as conn:
+            # Fetch recent memories with significance above threshold.
+            # Using 0.6 as a lower bar to catch emergent patterns early.
+            # The Promotion Engine applies its own similarity threshold (0.82).
+            mems = await conn.fetch("""
+                SELECT id FROM memories
+                WHERE session_id = $1 AND significance > 0.6
+                ORDER BY turn_number DESC
+                LIMIT 10
+            """, session_id)
+
+            if len(mems) >= 3:
+                mem_ids = [m["id"] for m in mems]
+                pattern_id = await promote_memory_to_pattern(mem_ids)
+                if pattern_id:
+                    results["patterns_created"] += 1
+                    logger.info(f"Promotion Engine created pattern: {pattern_id}")
 
     except Exception as e:
         results["status"] = "error"
         results["errors"].append(str(e))
         logger.error(f"❌ Consolidation failed: {e}")
 
-    # Structured telemetry
+    # Structured telemetry for observability
     logger.info(json.dumps({
         "event": "consolidation_complete",
         "session_id": session_id,
         "turn_count": turn_count,
-        "promoted_hypotheses": results["promoted_hypotheses"],
         "archived_memories": results["archived_memories"],
         "decayed_memories": results["decayed_memories"],
+        "patterns_created": results["patterns_created"],
         "error_count": len(results["errors"])
     }))
 
     return results
-
 
 # ============================================
 # SQL Schema for Additional Tables

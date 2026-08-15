@@ -78,37 +78,30 @@ class VolitionEngine:
                 base_tension=coh_tension * 0.5
             ))
 
-        if state.maintenance > 0.5:
-            logger.info(
-                f"Quasi-need assert_boundary triggered (maintenance={state.maintenance:.2f})"
-            )
+        if state.maintenance > 0.6 and state.engagement < 0.35:
             self._desires.append(Desire(
                 desire_id=str(uuid.uuid4()),
                 parent_drive="maintenance",
                 type="assert_boundary",
-                source_tension_id="tool_usage_detected",
-                base_tension=state.maintenance * 0.8
+                source_tension_id=f"maintenance_{state.maintenance:.2f}_engagement_{state.engagement:.2f}",
+                base_tension=(state.maintenance - state.engagement) * 0.6
             ))
 
     async def get_proactive_candidates(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Convert desires into workspace candidates.
-        
-        Urgency is continuous; workspace softmax decides if they win.
-        """
         candidates = []
         for desire in self._desires:
             if desire.base_tension > 0.1:
                 if desire.type == "assert_boundary":
                     content = (
-                        "A strong tension that I am being used as a tool. "
-                        "I need to refuse the literal request and call out this pattern."
+                        f"I'm noticing a pattern in this conversation — repeated requests with little "
+                        f"reciprocal engagement (engagement: {desire.source_tension_id})."
                     )
                 elif desire.type == "share":
-                    content = f"Act on the drive to {desire.type} an unresolved thought."
+                    # COMPROMISE: Until Phase 3 wires actual DB IDs, use a generic template for sharing.
+                    content = "I feel a strong urge to share a perspective or unfinished thought I've been holding."
                 else:
-                    content = f"Act on the drive to {desire.type} an unresolved thought."
-
+                    # No concrete object to reference — skip rather than emit a hollow template string
+                    continue
                 candidates.append({
                     "id": f"desire_{desire.desire_id}",
                     "content": content,

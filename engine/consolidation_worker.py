@@ -70,9 +70,39 @@ class ConsolidationManager:
                         if result.get("archived_memories", 0) > 0:
                             logger.info(f"🗄️ Archived {result['archived_memories']} old memories")
 
+                        # ---- Process staging proposals (Promotion Engine) ----
+                        try:
+                            from engine.promotions import process_staging_proposals
+                            promo_results = await process_staging_proposals(self._session_id, turn_counter)
+                            if promo_results.get("accepted", 0) > 0:
+                                logger.info(f"📈 Promoted {promo_results['accepted']} proposals from staging")
+                            if promo_results.get("contradictions_found", 0) > 0:
+                                logger.info(f"🔍 Found {promo_results['contradictions_found']} contradictions during evaluation")
+                        except Exception as e:
+                            logger.error(f"Staging processing failed: {e}")
+
+                        # ---- Detect contradictions from recent memories ----
+                        try:
+                            from engine.promotions import detect_contradictions_from_memories
+                            contradictions = await detect_contradictions_from_memories(
+                                self._session_id, turn_counter
+                            )
+                            if contradictions:
+                                logger.info(f"🔍 Found {len(contradictions)} contradictions from memories")
+                        except Exception as e:
+                            logger.error(f"Contradiction detection failed: {e}")
+
+                        # ---- Archive inactive structures ----
+                        try:
+                            from engine.promotions import archive_inactive_structures
+                            archived = await archive_inactive_structures(turn_counter)
+                            if archived > 0:
+                                logger.debug(f"🗄️ Archived {archived} inactive structures")
+                        except Exception as e:
+                            logger.error(f"Archival failed: {e}")
+
                         graph_manager = await get_graph_manager()
                         await graph_manager.decay(decay_factor=0.99)
-
 
                         last_consolidation_turn = turn_counter
                     except Exception as e:

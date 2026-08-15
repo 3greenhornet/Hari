@@ -34,7 +34,7 @@ from engine.memory import embed
 from models.memory_event import MemoryEvent
 from psyche.state import HariState
 from engine.memory import increment_memory_usage
-from datetime import datetime
+from datetime import datetime, timezone
 from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibration
 from engine.attention_instrumentation import AttentionInstrumentation
 from engine.generativity_estimator import get_estimator
@@ -527,26 +527,74 @@ async def load_workspace(
         enriched_candidates.append((total_salience, item_type, source_id, payload, pressures))
 
 
-    # 4. Extract scores and apply Softmax with state‑driven temperature
-    scores = [c[0] for c in enriched_candidates]
-    temperature = 0.2 + (1.0 - state.dominance) * 0.8   # maps 0.0 → 1.0
-    if state.coherence > 0.7:
-        temperature *= 0.8
-    probabilities = _softmax(scores, temperature)
-    probabilities = np.array(probabilities)
-    prob_sum = np.sum(probabilities)
-    if prob_sum <= 0 or np.isnan(prob_sum):
-        # Fallback to uniform distribution if all scores are zero/NaN
-        probabilities = np.ones(len(probabilities))
-        prob_sum = len(probabilities)
-    probabilities = probabilities / prob_sum
+    # ------------------------------------------------------------------
+    # 5. Determine the cognitive winner.
+    #
+    # The workspace is not just a random bag of salient items.
+    # One candidate becomes the current focus; additional candidates
+    # become supporting context.
+    # ------------------------------------------------------------------
 
+    # Rank all candidates by salience descending.
+    ranked_indices = sorted(
+        range(len(enriched_candidates)),
+        key=lambda i: enriched_candidates[i][0],
+        reverse=True,
+    )
 
-    # 5. Select top items (stochastic sampling according to probabilities)
-    num_selected = min(workspace_size, len(enriched_candidates))
-    indices = list(range(len(enriched_candidates)))
-    selected_indices = np.random.choice(indices, size=num_selected, replace=False, p=probabilities)
-    selected_candidates = [enriched_candidates[i] for i in selected_indices]
+    # The top candidate is the cognitive winner.
+    winner_index = ranked_indices[0]
+
+    # The remaining candidates are eligible for supporting slots.
+    remaining_indices = ranked_indices[1:]
+
+    # How many supporting items do we need?
+    num_supporting = min(
+        max(0, workspace_size - 1),   # workspace_size is the total number of slots
+        len(remaining_indices),
+    )
+
+    if num_supporting > 0:
+        # Extract salience scores of the remaining candidates.
+        support_scores = np.array(
+            [enriched_candidates[i][0] for i in remaining_indices],
+            dtype=np.float64,
+        )
+
+        # Temperature for supporting selection – lower than main softmax
+        # to make it more focused, but still stochastic.
+        # Derive from coherence: high coherence => more focused (lower temp),
+        # low coherence => more exploratory (higher temp).
+        support_temperature = max(
+            0.15,
+            min(
+                0.6,
+                0.5 - (state.coherence * 0.3)
+            )
+        )
+
+        support_probabilities = _softmax(
+            support_scores.tolist(),
+            support_temperature,
+        )
+
+        supporting_indices = np.random.choice(
+            remaining_indices,
+            size=num_supporting,
+            replace=False,
+            p=support_probabilities,
+        ).tolist()
+    else:
+        supporting_indices = []
+
+    # Combine winner and supporters.
+    selected_indices = [winner_index] + supporting_indices
+
+    # Build the final list of candidates in the order: winner then supporters.
+    selected_candidates = [
+        enriched_candidates[i]
+        for i in selected_indices
+    ]
 
     # 6. Build WorkspaceItem objects with attention weights (normalised salience)
     workspace_items = []
@@ -723,7 +771,7 @@ async def load_workspace_secured(
                     turn_number=current_turn - 1,
                     role="assistant",
                     content=old_item.content,
-                    event_type="workspace_inertia",
+                    event_type="None",
                     thematic_tags=[],
                     significance=0.4,
                     meaning_summary=old_item.content[:100],

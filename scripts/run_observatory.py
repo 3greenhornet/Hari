@@ -80,6 +80,33 @@ class SimulatedUser:
 
 async def run_observatory():
     session_id = f"baseline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # =====================================================================
+    # AUTOMATIC DATABASE CLEARING - Every test starts with a fresh Hari
+    # =====================================================================
+    from db.connection import get_pool
+    pool = await get_pool()
+    if pool:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                TRUNCATE memories CASCADE;
+                TRUNCATE curiosity_nodes CASCADE;
+                TRUNCATE curiosity_edges CASCADE;
+                TRUNCATE hypotheses CASCADE;
+                TRUNCATE self_beliefs CASCADE;
+                TRUNCATE narrative_threads CASCADE;
+                TRUNCATE decision_traces CASCADE;
+                TRUNCATE trace_workspace_items CASCADE;
+            """)
+            print("🧹 All previous session data cleared. Fresh start.")
+
+    # Reinitialize the curiosity graph in memory so it drops the old 91 nodes
+    from engine.curiosity_graph import get_graph_manager
+    graph_mgr = await get_graph_manager()
+    await graph_mgr.initialize()
+    print("🧠 Curiosity graph reinitialized (0 nodes).")
+    # =====================================================================
+
     state = HariState()
     grace = GraceTracker()
     pipeline = TurnPipeline(session_id, state, grace)

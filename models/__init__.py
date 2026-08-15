@@ -10,7 +10,7 @@ from .monologue_output import MonologueOutput
 from .identity import IdentityModel, ConstitutionModel, OriginModel, SelfModel, PerspectiveShift
 
 # Relational layer
-from .relational import RelationshipModel, Interest, Contradiction, RelationalLandmark
+from .relational import (RelationshipModel, Interest, Contradiction, RelationalLandmark, Pattern)
 
 # Thought
 from .thought import Thought

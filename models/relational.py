@@ -165,3 +165,40 @@ class Contradiction(BaseModel):
     def link_curiosity_node(self, node_id: str) -> None:
         if node_id not in self.linked_curiosity_node_ids:
             self.linked_curiosity_node_ids.append(node_id)
+
+
+class Pattern(BaseModel):
+    """
+    Layer 2: Thematic cluster of related memories.
+
+    Patterns are the first ecology step: they group ≥3 similar MemoryEvents
+    into a coherent theme, capturing recurrent experiences that may later
+    evolve into Contradictions or Interests.
+    """
+    pattern_id: str = Field(..., description="Unique identifier, e.g., 'pattern_abc123_1718400000'")
+    session_id: str = Field(..., description="Session where this pattern was formed")
+    description: str = Field(..., description="Human‑readable summary of the pattern")
+    supporting_memory_ids: List[str] = Field(
+        default_factory=list,
+        description="Memory IDs that contributed to this pattern"
+    )
+    supporting_trace_ids: List[str] = Field(
+        default_factory=list,
+        description="Trace IDs of the source memories"
+    )
+    cluster_similarity: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Average cosine similarity of the memory cluster"
+    )
+    significance: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description="Aggregated significance of the underlying memories"
+    )
+    status: Literal["emerging", "active", "archived"] = Field(
+        default="emerging",
+        description="Lifecycle stage of the pattern"
+    )
+    created_turn: int = Field(default=0, description="Turn number when the pattern was first created")
+    last_updated_turn: int = Field(default=0, description="Most recent turn when the pattern was reinforced")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

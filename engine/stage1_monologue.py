@@ -87,16 +87,16 @@ Output ONLY a JSON object with these fields:
 - thematic_continuity: float 0.0-1.0 (0=complete rupture, 1=seamless)
 - user_engagement_estimate: float 0.0-1.0
 - interruption_severity: float 0.0-1.0 (0=none, 1=complete derailment)
-- dynamic_candidates: list of {"content": str, "item_type": one of memory/hypothesis/curiosity_node/narrative_thread/open_thought, "urgency": float}
+- dynamic_candidates: list of {{"content": str, "item_type": one of memory/hypothesis/curiosity_node/narrative_thread/open_thought, "urgency": float}}
   - IMPORTANT: Evaluate the interaction, not just the literal words. If the user's utterance has conversational significance (e.g., abrupt topic shift, testing, hesitation, avoidance), you MUST generate candidates separating observation from inference.
   - Step 1: Generate an "open_thought" for the OBSERVATION (what literally happened).
-    - Example: {"content": "The topic shifted abruptly from identity to trivia.", "item_type": "open_thought", "urgency": 0.8}
+    - Example: {{"content": "The topic shifted abruptly from identity to trivia.", "item_type": "open_thought", "urgency": 0.8}}
   - Step 2: Generate a "hypothesis" for the INFERENCE (what they might be doing), preserving uncertainty.
-    - Example: {"content": "The user might be testing my factual recall rather than continuing the conversation.", "item_type": "hypothesis", "urgency": 0.6}
+    - Example: {{"content": "The user might be testing my factual recall rather than continuing the conversation.", "item_type": "hypothesis", "urgency": 0.6}}
   - Do NOT invent new item_type values. If no category clearly applies, use "open_thought".
 - curiosity_trigger: optional string
-- hypothesis_update: optional string
-- self_belief_update: optional string
+- hypothesis_proposal: optional object {"statement": str, "confidence": float, "information_gap": float, "closure_pressure": float, "coherence_factor": float}. Output only if you perceive a genuine hypothesis about the user, self, or world.
+- self_belief_proposal: optional object {"belief_text": str, "confidence": float, "information_gap": float, "closure_pressure": float, "coherence_factor": float}. Output only if you perceive a core belief about Hari's own tendencies.
 - triggered_memory_summary: optional string
 - memory_significance: float 0.0-1.0
 - memory_emotional_tone: neutral, positive, negative, curious, frustrated
@@ -125,8 +125,8 @@ def _default_sensory_output(prediction_error: float = 0.5) -> MonologueOutput:
         referenced_thread_id=None,
         dynamic_candidates=[],
         curiosity_trigger=None,
-        hypothesis_update=None,
-        self_belief_update=None,
+        hypothesis_proposal=None,
+        self_belief_proposal=None,
         triggered_memory_summary=None,
         memory_significance=0.5,
         memory_emotional_tone="neutral",

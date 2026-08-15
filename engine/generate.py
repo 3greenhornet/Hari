@@ -9,7 +9,6 @@ from litellm import acompletion
 import copy
 import asyncio
 import hashlib
-from datetime import datetime, timezone
 
 from models.identity import IdentityModel
 from engine.projection.identity_renderer import build_system_prompt_from_identity
@@ -29,9 +28,6 @@ from models.decision_trace import DecisionTrace, WorkspaceItemTrace
 from engine.attention import load_workspace, broadcast_feedback, WorkspaceItem, load_workspace_secured
 from engine.curiosity_graph import get_graph_manager
 from engine.narrative_manager import NarrativeManager
-from engine.self_belief import SelfBeliefManager
-from engine.memory_consolidation import store_hypothesis
-from models.hypothesis import Hypothesis
 from engine.events import EventLogger
 from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibration
 from engine.attention_instrumentation import AttentionInstrumentation
@@ -105,16 +101,15 @@ class TurnPipeline:
             snippet = item.content[:200] if item.content else ""
             if not snippet:
                 continue
-            
-            # Abstract internal types into semantic cognitive states
+                        # Map internal types to direct cognitive instructions
             if item.item_type == "memory":
-                state_type = "recall"
-            elif item.item_type in ("hypothesis", "curiosity_node", "narrative_thread", "open_thought", "open_thread"):
-                state_type = "active_thought"
+                fragments.append(f"You recall: {snippet}")
+            elif item.item_type == "hypothesis":
+                fragments.append(f"You suspect: {snippet}")
+            elif item.item_type in ("curiosity_node", "narrative_thread", "open_thought", "open_thread"):
+                fragments.append(f"You are currently thinking: {snippet}")
             else:
-                state_type = "context"
-                
-            fragments.append(f"[Weight: {item.attention_weight:.2f} | State: {state_type}] {snippet}")
+                fragments.append(f"Context: {snippet}")
 
         if not fragments:
             return "No active context."
@@ -316,27 +311,55 @@ class TurnPipeline:
         if deviation > 0.3 and confidence > 0.4:
             logger.info(f"Trajectory deviation detected: {deviation:.2f} (confidence: {confidence:.2f})")
 
-        if monologue_output.self_belief_update:
-            await SelfBeliefManager.store(self.session_id, monologue_output.self_belief_update)
-
-        # --- Store hypothesis update ---
-        if monologue_output.hypothesis_update:
+        # --- Stage hypothesis proposals ---
+        if monologue_output.hypothesis_proposal:
+            proposal = monologue_output.hypothesis_proposal
             try:
-                # Temporary: use "world" as default type.
-                # Future: Ticket 005A will implement proper classification
-                # and emit structured HypothesisUpdate from monologue.
-                hypothesis = Hypothesis(
-                    type="world",
-                    statement=monologue_output.hypothesis_update,
-                    confidence=0.6,   # TODO: Derive from monologue in future
-                    supporting_event_ids=[],
-                    contradicting_event_ids=[],
-                    last_updated=datetime.now(timezone.utc)
-                )
-                await store_hypothesis(hypothesis, "world")
-                logger.debug(f"Stored hypothesis update: {monologue_output.hypothesis_update[:50]}...")
+                from db.connection import get_pool
+                pool = await get_pool()
+                if pool:
+                    async with pool.acquire() as conn:
+                        await conn.execute("""
+                            INSERT INTO staging_proposals (
+                                proposal_id, session_id, proposal_type, content, source_module,
+                                source_trace_id, source_turn,
+                                information_gap, closure_pressure, coherence_factor,
+                                confidence_estimate
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        """,
+                            str(uuid.uuid4()), self.session_id, 'hypothesis', proposal.statement,
+                            'monologue', trace_id or str(uuid.uuid4()), turn_count,
+                            proposal.information_gap, proposal.closure_pressure, proposal.coherence_factor,
+                            proposal.confidence
+                        )
+                logger.debug(f"Staged hypothesis proposal: {proposal.statement[:50]}...")
             except Exception as e:
-                logger.warning(f"Failed to store hypothesis update: {e}")
+                logger.warning(f"Failed to stage hypothesis: {e}")
+
+        # --- Stage self-belief proposals ---
+        if monologue_output.self_belief_proposal:
+            proposal = monologue_output.self_belief_proposal
+            try:
+                from db.connection import get_pool
+                pool = await get_pool()
+                if pool:
+                    async with pool.acquire() as conn:
+                        await conn.execute("""
+                            INSERT INTO staging_proposals (
+                                proposal_id, session_id, proposal_type, content, source_module,
+                                source_trace_id, source_turn,
+                                information_gap, closure_pressure, coherence_factor,
+                                confidence_estimate
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        """,
+                            str(uuid.uuid4()), self.session_id, 'self_belief', proposal.belief_text,
+                            'monologue', trace_id or str(uuid.uuid4()), turn_count,
+                            proposal.information_gap, proposal.closure_pressure, proposal.coherence_factor,
+                            proposal.confidence
+                        )
+                logger.debug(f"Staged self-belief proposal: {proposal.belief_text[:50]}...")
+            except Exception as e:
+                logger.warning(f"Failed to stage self-belief: {e}")
 
         # Step 3b: Update grace tracker with monologue\"s engagement estimate
         self.grace_tracker.add_engagement_score(monologue_output.user_engagement_estimate)
@@ -372,11 +395,8 @@ class TurnPipeline:
 
         # Step 5: Broadcast feedback from workspace to state drives
         broadcast_feedback(workspace_items, self.state)
-
         # Step 6: Increment memory usage for selected memory items
-        memory_ids = [item.payload.get("id") for item in workspace_items if item.item_type == "memory"]
-        if memory_ids:
-            await increment_memory_usage(memory_ids, turn_count)
+        # NOTE: Memory usage is now incremented inside `load_workspace` to avoid double-counting.
 
         # --- Build DecisionTrace ---
         model_used = getattr(monologue_output, "model_used", "gemini-2.5-flash")
@@ -505,6 +525,14 @@ class TurnPipeline:
                 "temperature": telemetry.get("temperature"),
             }))
 
+        try:
+            # Ensure any pending narrative updates are flushed but do not block the turn
+            if hasattr(self, "narrative_manager") and self.narrative_manager:
+                await self.narrative_manager.flush_updates()
+        except Exception as e:
+            logger.error(f"Failed to flush narrative updates: {e}")
+            # Do not raise; allow the turn to return successfully
+
         self.state._last_assistant_response = dialogue
 
         return {
@@ -520,66 +548,140 @@ class TurnPipeline:
     async def _generate_dialogue(self, workspace_items: List[WorkspaceItem], user_input: str,
                                 turn_count: int, surprise: float, trace_id: Optional[str] = None) -> str:
 
-        # Check if minimal candidate won (Economy of Presence)
-        if any(item.item_type == "minimal" for item in workspace_items[:5]):
-            context_summary = "DIRECTIVE: Respond with extreme brevity (1-3 words). Do not elaborate or ask questions."
-        else:
-            context_summary = self._build_conversational_context(workspace_items)
-            # Append economy modulation to context
-            economy = self.state.economy_pressure
-            if economy > 0.5:
-                context_summary += "\n\n[Internal Pressure: Be very brief. 1-3 sentences max.]"
-            elif economy > 0.3:
-                context_summary += "\n\n[Internal Pressure: Be concise. 1-2 short paragraphs.]"
-        
-        # Build identity-aware system prompt
+        # 1. Hari's constitution
         identity_model = getattr(self, "identity_model", None)
-        system_prompt = build_system_prompt_from_identity(identity_model=identity_model, context="dialogue")
+        system_prompt = build_system_prompt_from_identity(
+            identity_model=identity_model,
+            context="dialogue",
+        )
+
+        # 2. Generation parameters derived from state
+        arousal = getattr(self.state, "arousal", 0.0)
+        novelty = getattr(self.state, "novelty", 0.0)
+
+        temperature = max(
+            0.1,
+            min(
+                1.0,
+                0.4 + (arousal * 0.3) + (novelty * 0.3),
+            ),
+        )
+
+        presence_penalty = 0.0  # Not applying until we understand the relationship
+
+        # 3. The workspace winner is Hari's current cognitive center
+        winner = workspace_items[0] if workspace_items else None
+
+        active_thought = (
+            winner.content[:300]
+            if winner is not None and winner.content
+            else ""
+        )
+
+        active_type = (
+            winner.item_type
+            if winner is not None
+            else "none"
+        )
+
+        # 4. Determine whether Hari's own cognition has strong momentum
+        internal_pressure = (
+            self.state.completion +
+            self.state.curiosity
+        )
+
+        cognitive_tension = getattr(
+            self.state,
+            "cognitive_tension",
+            0.0,
+        )
+
+        user_pull = 1.0 - cognitive_tension
+
+        autonomous_focus = (
+            internal_pressure > 1.2
+            and user_pull < 0.4
+            and bool(active_thought)
+        )
+
+        # 5. Present the conversation as a social event
+        conversation_payload = (
+            "PARTICIPANT UTTERANCE:\n"
+            f"{user_input}\n\n"
+            "HARI'S CURRENT COGNITIVE CENTER:\n"
+            f"type: {active_type}\n"
+            f"content: {active_thought or 'none'}\n\n"
+            "HARI'S INTERNAL ATTENTIONAL CONDITION:\n"
+            f"autonomous_focus: {autonomous_focus}\n"
+            f"internal_pressure: {internal_pressure:.3f}\n"
+            f"user_pull: {user_pull:.3f}"
+        )
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "system", "content": f"INTERNAL COGNITIVE CONTEXT (Do not output this to the user. Synthesize it naturally):\n{context_summary}"},
-            {"role": "user", "content": user_input}
+            {"role": "user", "content": conversation_payload},
         ]
 
         logger.info(
             "WORKSPACE_WINNERS:\n%s",
-            "\n".join(f"{item.item_type}: {item.content[:100]}" for item in workspace_items)
+            "\n".join(
+                f"{item.item_type}: {item.content[:100]}"
+                for item in workspace_items
+            ),
         )
 
-        # CONTINUOUS VERBOSITY BUDGET
-        verbosity_budget = 450.0
-        verbosity_budget -= self.state.economy_pressure * 250.0
+        # 6. Verbosity as a generation constraint
+        economy_pressure = getattr(
+            self.state,
+            "economy_pressure",
+            0.0,
+        )
 
-        is_hold_space = any(item.payload.get("id") == "hold_space" for item in workspace_items[:5])
-        is_minimal = any(item.item_type == "minimal" for item in workspace_items[:5])
+        verbosity_budget = (
+            450.0
+            - (economy_pressure ** 1.5) * 400.0
+        )
 
-        if is_minimal:
-            verbosity_budget = 15.0
-        elif is_hold_space:
-            verbosity_budget = 50.0
-
-        max_tokens = int(max(15.0, min(450.0, verbosity_budget)))
+        max_tokens = int(
+            max(
+                15.0,
+                min(450.0, verbosity_budget),
+            )
+        )
 
         dialogue = "..."
+
         for model in FALLBACK_MODELS:
             try:
                 response = await acompletion(
                     model=model,
                     messages=messages,
-                    temperature=0.5 + (self.state.uncertainty * 0.3),  # 0.5-0.8 range
+                    temperature=temperature,
+                    presence_penalty=presence_penalty,
                     timeout=5,
                     num_retries=0,
-                    max_tokens=max_tokens
+                    max_tokens=max_tokens,
                 )
+
                 dialogue = response.choices[0].message.content.strip()
-                logger.info(f"Dialogue generated by {model} (max_tokens: {max_tokens})")
+
+                logger.info(
+                    "Dialogue generated by %s (max_tokens: %s)",
+                    model,
+                    max_tokens,
+                )
+
                 break
+
             except Exception as e:
-                logger.warning(f"Model {model} failed: {e}")
-                continue
+                logger.warning(
+                    "Model %s failed: %s",
+                    model,
+                    e,
+                )
 
         self._last_assistant_response = dialogue
+
         return dialogue
 
     async def _allocate_workspace(
@@ -602,6 +704,35 @@ class TurnPipeline:
 
         # 2. Prepare hypotheses (Phase 6 placeholder)
         hypotheses: List[Dict] = []
+        self_belief_candidates: List[Dict] = []
+        try:
+            from db.connection import get_pool
+            pool = await get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    hyp_rows = await conn.fetch("""
+                        SELECT id, statement, confidence FROM hypotheses
+                        ORDER BY confidence DESC LIMIT 5
+                    """)
+                    hypotheses = [
+                        {"id": f"hyp_{r['id']}", "content": r["statement"], "confidence": r["confidence"]}
+                        for r in hyp_rows
+                    ]
+                    belief_rows = await conn.fetch("""
+                        SELECT id, belief_text FROM self_beliefs
+                        WHERE is_active = TRUE ORDER BY created_at DESC LIMIT 3
+                    """)
+                    self_belief_candidates = [
+                        {
+                            "id": f"self_belief_{r['id']}",
+                            "content": f"Core self-belief: {r['belief_text']}",
+                            "urgency": 0.6,
+                            "item_type": "open_thought"
+                        }
+                        for r in belief_rows
+                    ]
+        except Exception as e:
+            logger.debug(f"Hypotheses/self-belief DB not available (non-critical): {e}")
 
         # 3. Prepare curiosity nodes with error handling
         curiosity_nodes: List[Dict] = []
@@ -630,35 +761,8 @@ class TurnPipeline:
             except Exception as e:
                 logger.debug(f"Narrative manager not ready: {e}")
 
-        # 5. Open threads – based on completion pressure
+        # 5. Open threads – injected only from DB, monologue, volition, or endogenous mechanisms
         open_threads: List[Dict] = []
-        if self.state.completion > 0.6:
-            open_threads.append({
-                "id": "current_thought",
-                "content": "Complete the ongoing line of reasoning before fully addressing user input.",
-                "urgency": self.state.completion,
-                "item_type": "open_thread"
-            })
-
-        # Economy candidate: allows Hari to choose brevity
-        if self.state.economy_pressure > 0.3:
-            open_threads.append({
-                "id": "economy_minimal",
-                "content": "Presence without performance. Be brief and direct.",
-                "urgency": self.state.economy_pressure,
-                "item_type": "minimal"
-            })
-
-        # Hold-Space candidate: acknowledge without adding new information.
-        hold_urgency = 0.1 + (self.state.rest * 0.3) + ((1.0 - self.state.engagement) * 0.2)
-        hold_urgency = min(0.8, hold_urgency)
-
-        open_threads.append({
-            "id": "hold_space",
-            "content": "Acknowledge the user's input briefly without adding new information or questions.",
-            "urgency": hold_urgency,
-            "item_type": "open_thought"
-        })
 
         # Ticket 014: Inject trajectory candidate if detected
         if hasattr(self, "_trajectory_candidate") and self._trajectory_candidate:
@@ -667,20 +771,6 @@ class TurnPipeline:
         # Inject volition-driven candidates
         if proactive_candidates:
             open_threads.extend(proactive_candidates)
-
-        # Social Bootstrapping: Wait for a foothold (turn > 1) and low familiarity
-        if hasattr(self, 'relational_manager'):
-            familiarity = self.relational_manager.get_model().familiarity
-            # Only inject if very low familiarity
-            if familiarity < 0.2 and len(self.history) >= 2:
-                # Lower urgency so it doesn't dominate every factual question
-                urgency = 0.35 * (1.0 - familiarity)
-                open_threads.append({
-                    "id": "social_orientation",
-                    "content": "We are strangers interacting for the first time. It might be natural to exchange names or establish why we are talking.",
-                    "urgency": urgency,
-                    "item_type": "open_thought"
-                })
 
         # Expand hook if we have a specific hook ID to expand
         if hasattr(self, "_expand_hook_id") and self._expand_hook_id:
@@ -691,15 +781,10 @@ class TurnPipeline:
                 memory_candidates.append(full_mem)
             self._expand_hook_id = None
         
-        # If multiple hooks exist, ask for clarification
+        # If multiple hooks exist, leave ambiguous hooks for higher-level handling (do not inject hardcoded clarify candidate)
         if hasattr(self, "_ambiguous_hooks") and self._ambiguous_hooks:
-            open_threads.append({
-                "id": "clarify_hook",
-                "content": "I mentioned several things. Which one were you curious about?",
-                "urgency": 0.3,
-                "item_type": "open_thought"
-            })
-            self._ambiguous_hooks = None
+            # keep _ambiguous_hooks for external handling; do not inject a hardcoded clarification thread
+            pass
 
         # 6. Previous workspace items for inertia
         if not hasattr(self, "_previous_workspace"):

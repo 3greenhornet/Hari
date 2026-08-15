@@ -20,30 +20,45 @@ class AttentionCalibration:
     """
     
     # Base weights for primary pressures (will be normalized)
-    relevance_base: float = 0.8
-    novelty_base: float = 0.3
-    curiosity_base: float = 0.2
-    completion_base: float = 0.2
+    relevance_base: float = 0.45          # Reduced from 0.8 to allow internal drives to compete
+    novelty_base: float = 0.35            # Increased from 0.3
+    curiosity_base: float = 0.35          # Increased from 0.2
+    completion_base: float = 0.35         # Increased from 0.2
     
     # Base weights for derived pressures (Ticket 011, 012)
-    exploratory_base: float = 0.3      # Ticket 011
-    shared_significance_base: float = 0.2  # Ticket 012
+    exploratory_base: float = 0.30        # Ticket 011
+    shared_significance_base: float = 0.30 # Ticket 012 – increased from 0.2
     
-    # Base weights for interruption/coherence tension (NEW)
-    coherence_tension_base: float = 0.4
+    # Base weights for interruption/coherence tension
+    coherence_tension_base: float = 0.30   # Reduced from 0.4
     
     # State modulation factors (how much state influences each weight)
-    engagement_modulation: float = 0.2    # relevance = base + engagement * this
-    curiosity_modulation: float = 0.6     # curiosity = base + curiosity * this
-    novelty_modulation: float = 0.5       # novelty = base + curiosity * this
-    completion_modulation: float = 0.6    # completion = base + completion * this
-    exploratory_modulation: float = 0.4   # exploratory = base + novelty * this (Ticket 011)
-    shared_significance_modulation: float = 0.4  # shared = base + care * this (Ticket 012)
-    coherence_tension_modulation: float = 0.5    # coherence_tension = base + cognitive_tension * this (NEW)
+    engagement_modulation: float = 0.10    # Reduced from 0.2
+    curiosity_modulation: float = 0.50     # Reduced from 0.6
+    novelty_modulation: float = 0.50       # Reduced from 0.5
+    completion_modulation: float = 0.50    # Reduced from 0.6
+    exploratory_modulation: float = 0.40   # Same
+    shared_significance_modulation: float = 0.40  # Same
+    coherence_tension_modulation: float = 0.50    # Same
     
     # Feedback loop guards (prevent positive feedback)
-    max_engagement_influence: float = 0.8  # Cap engagement's influence
-    engagement_decay: float = 0.01         # Decay factor per turn
+    max_engagement_influence: float = 0.30  # Reduced from 0.8 to stop engagement from dominating
+    
+    # engagement_decay: float = 0.01
+    # 
+    # PURPOSE (preserved for future use):
+    # This field was originally intended to model how engagement gradually fades
+    # over time unless reinforced by reciprocal interaction. It represents the
+    # idea that social energy naturally depletes without positive feedback.
+    # 
+    # It is currently NOT used in get_weights() because we haven't implemented
+    # a decay mechanism for engagement yet. If we later add a slow decay to
+    # engagement itself (not just its influence on weights), this coefficient
+    # should be used to control the rate.
+    #
+    # Keeping it here preserves the design intention. Remove only after we
+    # have a concrete alternative that fulfills the same purpose.
+    engagement_decay: float = 0.01  # Preserved – unused but design-relevant
     
     # Normalization
     normalize_weights: bool = True
@@ -59,21 +74,21 @@ class AttentionCalibration:
     def from_env(cls) -> "AttentionCalibration":
         """Create config from environment variables."""
         return cls(
-            relevance_base=float(os.getenv("ATTENTION_RELEVANCE_BASE", "0.8")),
-            novelty_base=float(os.getenv("ATTENTION_NOVELTY_BASE", "0.3")),
-            curiosity_base=float(os.getenv("ATTENTION_CURIOSITY_BASE", "0.2")),
-            completion_base=float(os.getenv("ATTENTION_COMPLETION_BASE", "0.2")),
-            exploratory_base=float(os.getenv("ATTENTION_EXPLORATORY_BASE", "0.3")),
-            shared_significance_base=float(os.getenv("ATTENTION_SHARED_BASE", "0.2")),
-            coherence_tension_base=float(os.getenv("ATTENTION_COHERENCE_TENSION_BASE", "0.4")),  # NEW
-            engagement_modulation=float(os.getenv("ATTENTION_ENGAGEMENT_MOD", "0.2")),
-            curiosity_modulation=float(os.getenv("ATTENTION_CURIOSITY_MOD", "0.6")),
-            novelty_modulation=float(os.getenv("ATTENTION_NOVELTY_MOD", "0.5")),
-            completion_modulation=float(os.getenv("ATTENTION_COMPLETION_MOD", "0.6")),
-            exploratory_modulation=float(os.getenv("ATTENTION_EXPLORATORY_MOD", "0.4")),
-            shared_significance_modulation=float(os.getenv("ATTENTION_SHARED_MOD", "0.4")),
-            coherence_tension_modulation=float(os.getenv("ATTENTION_COHERENCE_TENSION_MOD", "0.5")),  # NEW
-            max_engagement_influence=float(os.getenv("ATTENTION_MAX_ENGAGEMENT", "0.8")),
+            relevance_base=float(os.getenv("ATTENTION_RELEVANCE_BASE", "0.45")),
+            novelty_base=float(os.getenv("ATTENTION_NOVELTY_BASE", "0.35")),
+            curiosity_base=float(os.getenv("ATTENTION_CURIOSITY_BASE", "0.35")),
+            completion_base=float(os.getenv("ATTENTION_COMPLETION_BASE", "0.35")),
+            exploratory_base=float(os.getenv("ATTENTION_EXPLORATORY_BASE", "0.30")),
+            shared_significance_base=float(os.getenv("ATTENTION_SHARED_BASE", "0.30")),
+            coherence_tension_base=float(os.getenv("ATTENTION_COHERENCE_TENSION_BASE", "0.30")),
+            engagement_modulation=float(os.getenv("ATTENTION_ENGAGEMENT_MOD", "0.10")),
+            curiosity_modulation=float(os.getenv("ATTENTION_CURIOSITY_MOD", "0.50")),
+            novelty_modulation=float(os.getenv("ATTENTION_NOVELTY_MOD", "0.50")),
+            completion_modulation=float(os.getenv("ATTENTION_COMPLETION_MOD", "0.50")),
+            exploratory_modulation=float(os.getenv("ATTENTION_EXPLORATORY_MOD", "0.40")),
+            shared_significance_modulation=float(os.getenv("ATTENTION_SHARED_MOD", "0.40")),
+            coherence_tension_modulation=float(os.getenv("ATTENTION_COHERENCE_TENSION_MOD", "0.50")),
+            max_engagement_influence=float(os.getenv("ATTENTION_MAX_ENGAGEMENT", "0.30")),
             engagement_decay=float(os.getenv("ATTENTION_ENGAGEMENT_DECAY", "0.01")),
             log_pressure_contributions=os.getenv("ATTENTION_LOG", "True").lower() == "true",
             experiment_id=os.getenv("ATTENTION_EXPERIMENT_ID", None)
@@ -106,7 +121,7 @@ class AttentionCalibration:
             "exploratory_potential": self.exploratory_base + (float(state.novelty) * self.exploratory_modulation),
             # Ticket 012: Shared Significance (modulated by care drive)
             "shared_significance": self.shared_significance_base + (float(state.care) * self.shared_significance_modulation),
-            # Coherence Tension (interruption/context shift pressure) (NEW)
+            # Coherence Tension (interruption/context shift pressure)
             "coherence_tension": self.coherence_tension_base + (float(state.cognitive_tension) * self.coherence_tension_modulation),
         }
         

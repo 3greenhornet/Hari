@@ -69,6 +69,14 @@ async def interpret_turn_and_update_state(
         "engagement": (monologue_output.user_engagement_estimate * params.engagement_coeff) - (effective_shift * 0.02),
         "social_ambiguity": effective_shift * (1.0 - monologue_output.intent_confidence) * params.social_ambiguity_coeff
     }
+
+    # Map memory emotional tone to VAD adjustments
+    TONE_VALENCE = {"positive": 0.08, "frustrated": -0.1, "curious": 0.02, "calm": 0.0, "neutral": 0.0}
+    TONE_AROUSAL = {"frustrated": 0.12, "curious": 0.08, "positive": 0.02, "calm": -0.05, "neutral": 0.0}
+    tone = getattr(monologue_output, "memory_emotional_tone", "neutral")
+    tone_confidence = monologue_output.intent_confidence
+    state_updates["valence"] = state_updates.get("valence", 0.0) + TONE_VALENCE.get(tone, 0.0) * tone_confidence
+    state_updates["arousal"] = state_updates.get("arousal", 0.0) + TONE_AROUSAL.get(tone, 0.0) * tone_confidence
     
     # NEW: Social Meaning Synthesis (Intent-based drive updates)
     # Scaled by intent confidence so low-confidence interpretations have smaller impact

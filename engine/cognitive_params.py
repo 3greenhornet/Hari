@@ -23,7 +23,8 @@ class SocialParams:
     engagement_weight: float = 0.2
     history_weight: float = 0.1
     uncertainty_coeff: float = 0.3
-    engagement_coeff: float = 0.05
+    engagement_coeff: float = 0.25   # was 0.05
+    
     social_ambiguity_coeff: float = 0.2
     familiarity_growth_coeff: float = 0.01
     familiarity_shift_decay_coeff: float = 0.005
@@ -31,5 +32,45 @@ class SocialParams:
     trust_avoidance_coeff: float = 0.01
 
 
+@dataclass(frozen=True)
+class PromotionParams:
+    """Primitive 17-19: Ecology Pipeline calibration."""
+    # Pattern formation (Memory → Pattern)
+    pattern_min_memories: int = 3
+    pattern_similarity_threshold: float = 0.82
+    pattern_stability_cycles: int = 2
+    pattern_archive_age_turns: int = 20
+
+    # Contradiction detection (Pattern → Contradiction)
+    contradiction_similarity_threshold: float = 0.6
+    contradiction_severity_threshold: float = 0.3
+    contradiction_check_interval: int = 5
+    contradiction_llm_limit_per_cycle: int = 5
+
+    # Curiosity formation (Contradiction → Curiosity)
+    curiosity_importance_floor: float = 0.3
+    curiosity_workspace_wins_threshold: int = 5
+
+    # Interest formation (Curiosity → Interest)
+    interest_activation_threshold: float = 0.6
+    interest_session_repeats: int = 2
+
+    # Identity evolution (Interest → Identity)
+    identity_stabilization_threshold: float = 0.7
+
+    # Staging evaluation
+    staging_confidence_threshold: float = 0.6
+    staging_max_age_turns: int = 50
+    staging_batch_size: int = 20
+    staging_archive_age_turns: int = 100
+
+    # Archival
+    interest_idle_sessions_threshold: int = 3
+
+    # Performance
+    llm_timeout_seconds: float = 3.0
+
+
 FORGETTING = ForgettingParams()
 SOCIAL = SocialParams()
+PROMOTION = PromotionParams()

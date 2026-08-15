@@ -20,10 +20,11 @@ DRIVE_KEYS = ["care", "curiosity", "maintenance", "completion", "coherence", "re
 _DECAY_CONFIG = {
     "care": {"baseline": 0.5, "decay": 0.01, "rise": 0.05},
     "curiosity": {"baseline": 0.4, "decay": 0.04, "rise": 0.08},
-    "maintenance": {"baseline": 0.6, "decay": 0.02, "rise": 0.06},
+    "maintenance": {"baseline": 0.4, "decay": 0.02, "rise": 0.06},
     "completion": {"baseline": 0.3, "decay": 0.03, "rise": 0.07},
     "coherence": {"baseline": 0.7, "decay": 0.01, "rise": 0.04},
     "rest": {"baseline": 0.2, "decay": 0.08, "rise": 0.02},
+    "engagement": {"baseline": 0.5, "decay": 0.03, "rise": 0.03},
     "novelty": {"baseline": 0.1, "decay": 0.25, "rise": 0.15},
 }
 _VAD_DECAY = 0.02
