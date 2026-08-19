@@ -78,29 +78,25 @@ async def interpret_turn_and_update_state(
     state_updates["valence"] = state_updates.get("valence", 0.0) + TONE_VALENCE.get(tone, 0.0) * tone_confidence
     state_updates["arousal"] = state_updates.get("arousal", 0.0) + TONE_AROUSAL.get(tone, 0.0) * tone_confidence
     
-    # NEW: Social Meaning Synthesis (Intent-based drive updates)
-    # Scaled by intent confidence so low-confidence interpretations have smaller impact
-    intent = monologue_output.perceived_user_intent
-    confidence = monologue_output.intent_confidence
-    synthesis_reason = "social_synthesis"
-    
-    if intent == "testing":
-        state_updates["maintenance"] = 0.15 * confidence
-        synthesis_reason = "user_testing_boundary"
-    elif intent == "sharing" and monologue_output.user_engagement_estimate < 0.4:
-        state_updates["care"] = 0.05 * confidence
-        state_updates["arousal"] = -0.05 * confidence
-        synthesis_reason = "user_hesitant_or_bored"
-    elif intent == "help_seeking":
-        state_updates["care"] = 0.1 * confidence
-        synthesis_reason = "user_help_seeking"
-        
-    # TODO: Replace categorical intent interpretation with evidence-backed social hypotheses
-    # after the epistemic layer is introduced (future milestone).
-    
-    # Apply the combined updates
-    if effective_shift > 0.001 or abs(monologue_output.user_engagement_estimate - 0.5) > 0.05 or intent != "sharing":
-        state.update(state_updates, source="MONOLOGUE", reason=synthesis_reason)
+    # ------------------------------------------------------------------
+    # Social event synthesis – describes the interaction, not the user
+    # ------------------------------------------------------------------
+
+    social_effect = (
+        monologue_output.interruption_severity * 0.35
+        + monologue_output.trajectory_deviation * 0.25
+        + (1.0 - monologue_output.thematic_continuity) * 0.20
+        + monologue_output.intent_confidence * 0.20
+    )
+    social_effect = max(0.0, min(1.0, social_effect))
+
+    # Merge social effect into existing state_updates rather than overwriting
+    state_updates["uncertainty"] = state_updates.get("uncertainty", 0.0) + (social_effect * 0.20)
+    state_updates["social_ambiguity"] = state_updates.get("social_ambiguity", 0.0) + (social_effect * 0.15)
+    if monologue_output.interruption_severity > 0.0:
+        state_updates["cognitive_tension"] = state_updates.get("cognitive_tension", 0.0) + (monologue_output.interruption_severity * 0.15)
+
+    state.update(state_updates, source="MONOLOGUE", reason="interaction_event")
     
     # 6. Update Relationship Model (Glacial, Continuous Deltas)
     if relational_manager:
@@ -125,7 +121,7 @@ async def interpret_turn_and_update_state(
         f"sincerity={interaction.sincerity_estimate:.2f}, "
         f"trajectory={trajectory_deviation:.2f}, "
         f"rel_delta={interaction.relationship_delta:.4f}, "
-        f"reason={synthesis_reason}"
+        f"reason=interaction_event"
     )
     
     return interaction

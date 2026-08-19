@@ -164,14 +164,14 @@ Example:
 
             response = await acompletion(**kwargs)
             raw = response.choices[0].message.content.strip()
-
-            # Extract JSON from the response
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if not match:
-                logger.warning(f"Model {model} returned no JSON object.")
+            # Extract JSON from the response using robust parser
+            try:
+                from engine.stage1_monologue import _extract_json_safely
+                clean = _extract_json_safely(raw)
+                data = json.loads(clean)
+            except Exception as e:
+                logger.warning(f"Model {model} returned no JSON object or parsing failed: {e}")
                 continue
-
-            data = json.loads(match.group(0))
 
             # Default type to "world" if missing
             hypo_type = data.get("type", "world")

@@ -12,6 +12,12 @@ class WorkspaceItemTrace(BaseModel):
     attention_weight: float
     content_snapshot: str
     is_winner: bool
+    
+    # NEW: provenance fields
+    origin: Optional[str] = None          # where did this candidate come from?
+    activated_by: Optional[str] = None    # which event activated it?
+    intrinsic_relevance: float = Field(default=0.0)
+    persistence: float = Field(default=0.0)
 
 class Metrics(BaseModel):
     prompt_tokens: int = 0

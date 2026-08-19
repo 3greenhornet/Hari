@@ -123,6 +123,9 @@ async def run_observatory():
         print(f"User: {user_input}")
         
         result = await pipeline.execute(user_input, turn_count)
+        from engine.consolidation_worker import get_manager
+        consolidation_manager = get_manager()
+        consolidation_manager.update_turn(turn_count)
         dialogue = result["dialogue"]
         print(f"Hari: {dialogue}")
         

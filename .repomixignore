@@ -30,3 +30,19 @@ venv/
 .git/
 
 hari_july.md
+
+
+
+*.md
+*.txt
+*.ps1
+*.log
+*.xml
+.env
+.gitignore
+bundle.py
+TODO.md
+AGENTS.md
+CLAUDE.md
+_framework_extracted.txt
+packages.txt

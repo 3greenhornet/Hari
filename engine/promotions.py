@@ -75,14 +75,18 @@ Output ONLY a JSON object with two fields:
             # Direct await – acompletion is already async
             response = await acompletion(**kwargs)
             raw = response.choices[0].message.content
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                data = json.loads(match.group(0))
+            try:
+                from engine.stage1_monologue import _extract_json_safely
+                clean = _extract_json_safely(raw)
+                data = json.loads(clean)
                 tension_type = data.get("tension_type", "neutral")
                 severity = float(data.get("severity", 0.0))
                 _tension_cache[cache_key] = (tension_type, severity)
                 _contradiction_history[cache_key] = (datetime.now(), severity)
                 return tension_type, severity
+            except Exception as e:
+                logger.warning(f"Failed to parse tension response from {model}: {e}")
+                continue
         except Exception as e:
             logger.warning(f"Tension classification failed on {model}: {e}")
             continue
@@ -334,86 +338,171 @@ async def promote_interest_to_identity_anchor(
 # Staging Processor (The Convergence Hub)
 # ============================================================
 
+from dataclasses import dataclass
+from typing import List, Optional
+import uuid
+
+@dataclass
+class ProposalEvaluation:
+    proposal_id: str
+    proposal_type: str  # 'user', 'self', 'world', or 'self_belief'
+    content: str
+    confidence: float
+    accepted: bool
+    rejection_reason: Optional[str]
+    contradiction_found: bool
+    contradiction_severity: float
+    source_trace_id: str
+
+
 async def process_staging_proposals(session_id: str, current_turn: int) -> Dict[str, int]:
-    """
-    Processes pending staging proposals: evaluates evidence, checks contradictions,
-    promotes to accepted tables.
-    """
     results = {"accepted": 0, "rejected": 0, "contradictions_found": 0}
     pool = await get_pool()
     if not pool:
         return results
 
+    # ------------------------------------------------------------------
+    # PHASE 1 – ATOMIC CLAIM
+    # ------------------------------------------------------------------
+    claimed_proposals = []
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            proposals = await conn.fetch("""
-                SELECT * FROM staging_proposals
-                WHERE status = 'pending'
-                AND session_id = $1
+        rows = await conn.fetch("""
+            WITH claimed AS (
+                SELECT proposal_id
+                FROM staging_proposals
+                WHERE session_id = $1
+                  AND status = 'pending'
                 ORDER BY created_at ASC
                 LIMIT $2
-            """, session_id, PROMOTION.staging_batch_size)
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE staging_proposals sp
+            SET status = 'processing',
+                processing_started_at = NOW()
+            FROM claimed
+            WHERE sp.proposal_id = claimed.proposal_id
+            RETURNING sp.*
+        """, session_id, PROMOTION.staging_batch_size)
+        claimed_proposals = rows
 
-            for prop in proposals:
-                confidence = prop.get("confidence_estimate", 0.5)
-                info_gap = prop.get("information_gap", 0.0)
-                closure_pressure = prop.get("closure_pressure", 0.0)
-                coherence_factor = prop.get("coherence_factor", 0.0)
+    if not claimed_proposals:
+        return results
 
-                combined = (confidence * 0.4) + (info_gap * 0.2) + (closure_pressure * 0.2) + (coherence_factor * 0.2)
+    # ------------------------------------------------------------------
+    # PHASE 2 – EVALUATE (no DB connection held)
+    # ------------------------------------------------------------------
+    # Fetch existing hypotheses once – type-aware
+    existing_hypotheses = {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT type, statement FROM hypotheses
+            ORDER BY confidence DESC, last_updated DESC
+            LIMIT 20
+        """)
+        for row in rows:
+            existing_hypotheses.setdefault(row["type"], []).append(row["statement"])
 
-                accepted = False
-                rejection_reason = None
-                if combined >= PROMOTION.staging_confidence_threshold:
-                    # Check for contradictions with existing hypotheses (only for hypotheses)
-                    has_contradiction = False
-                    if prop["proposal_type"] == "hypothesis":
-                        existing = await conn.fetch("""
-                            SELECT statement FROM hypotheses WHERE type IN ('world', 'self') LIMIT 5
-                        """)
-                        for hyp in existing:
-                            tension_type, severity = await _evaluate_tension_llm(
-                                prop["content"],
-                                hyp["statement"]
-                            )
-                            if tension_type == "contradiction" and severity > 0.3:
-                                has_contradiction = True
-                                results["contradictions_found"] += 1
-                                logger.info(f"Contradiction with existing hypothesis: {hyp['statement'][:50]}")
-                                break
+    evaluations: List[ProposalEvaluation] = []
 
-                    if not has_contradiction:
-                        # Promote
-                        if prop["proposal_type"] == "hypothesis":
-                            await conn.execute("""
-                                INSERT INTO hypotheses (type, statement, confidence, supporting_event_ids, last_updated)
-                                VALUES ('world', $1, $2, $3::TEXT[], $4)
-                                ON CONFLICT (type, statement) DO UPDATE
-                                SET confidence = (hypotheses.confidence + EXCLUDED.confidence) / 2,
-                                    supporting_event_ids = array_cat(hypotheses.supporting_event_ids, EXCLUDED.supporting_event_ids),
-                                    last_updated = EXCLUDED.last_updated
-                            """, prop["content"], combined, [prop["source_trace_id"]], datetime.now(timezone.utc))
-                        elif prop["proposal_type"] == "self_belief":
-                            await conn.execute("""
-                                INSERT INTO self_beliefs (id, session_id, belief_text, created_at)
-                                VALUES ($1, 'system', $2, NOW())
-                            """, str(uuid.uuid4()), prop["content"])
-                        accepted = True
-                        results["accepted"] += 1
+    for prop in claimed_proposals:
+        confidence = float(prop.get("confidence_estimate", 0.5))
+        info_gap = float(prop.get("information_gap", 0.0))
+        closure_pressure = float(prop.get("closure_pressure", 0.0))
+        coherence_factor = float(prop.get("coherence_factor", 0.0))
 
-                if accepted:
+        combined = (
+            confidence * 0.4
+            + info_gap * 0.2
+            + closure_pressure * 0.2
+            + coherence_factor * 0.2
+        )
+
+        accepted = False
+        rejection_reason = None
+        contradiction_found = False
+        contradiction_severity = 0.0
+
+        # Determine if this is a hypothesis type
+        is_hypothesis = prop["proposal_type"] in ("user", "self", "world")
+
+        if combined >= PROMOTION.staging_confidence_threshold and is_hypothesis:
+            # Check contradictions only against same-type hypotheses
+            same_type_hypotheses = existing_hypotheses.get(prop["proposal_type"], [])
+            for hyp_statement in same_type_hypotheses:
+                tension_type, severity = await _evaluate_tension_llm(
+                    prop["content"],
+                    hyp_statement,
+                )
+                if (
+                    tension_type == "contradiction"
+                    and severity >= PROMOTION.contradiction_severity_threshold
+                ):
+                    contradiction_found = True
+                    contradiction_severity = severity
+                    results["contradictions_found"] += 1
+                    logger.info(f"Contradiction with existing {prop['proposal_type']} hypothesis")
+                    break
+
+            if not contradiction_found:
+                accepted = True
+
+        elif combined >= PROMOTION.staging_confidence_threshold and prop["proposal_type"] == "self_belief":
+            accepted = True
+
+        if not accepted and not rejection_reason:
+            rejection_reason = (
+                "Contradiction detected" if contradiction_found
+                else "Insufficient combined score"
+            )
+
+        evaluations.append(
+            ProposalEvaluation(
+                proposal_id=prop["proposal_id"],
+                proposal_type=prop["proposal_type"],
+                content=prop["content"],
+                confidence=combined,
+                accepted=accepted,
+                rejection_reason=rejection_reason,
+                contradiction_found=contradiction_found,
+                contradiction_severity=contradiction_severity,
+                source_trace_id=prop["source_trace_id"],
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # PHASE 3 – COMMIT (re‑acquire connection)
+    # ------------------------------------------------------------------
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for ev in evaluations:
+                if ev.accepted:
                     status = 'accepted'
+                    if ev.proposal_type in ("user", "self", "world"):
+                        # Hypothesis
+                        await conn.execute("""
+                            INSERT INTO hypotheses (type, statement, confidence, supporting_event_ids, last_updated)
+                            VALUES ($1, $2, $3, $4::TEXT[], $5)
+                            ON CONFLICT (type, statement) DO UPDATE
+                            SET confidence = (hypotheses.confidence + EXCLUDED.confidence) / 2,
+                                supporting_event_ids = array_cat(hypotheses.supporting_event_ids, EXCLUDED.supporting_event_ids),
+                                last_updated = EXCLUDED.last_updated
+                        """, ev.proposal_type, ev.content, ev.confidence, [ev.source_trace_id], datetime.now(timezone.utc))
+                        results["accepted"] += 1
+                    elif ev.proposal_type == "self_belief":
+                        await conn.execute("""
+                            INSERT INTO self_beliefs (id, session_id, belief_text, created_at)
+                            VALUES ($1, 'system', $2, NOW())
+                        """, str(uuid.uuid4()), ev.content)
+                        results["accepted"] += 1
                 else:
-                    # Reject proposals that don't meet the threshold
                     status = 'rejected'
                     results["rejected"] += 1
-                    rejection_reason = 'Insufficient combined score or aged out'
 
                 await conn.execute("""
                     UPDATE staging_proposals
                     SET status = $1, evaluated_at = NOW(), rejection_reason = $2
                     WHERE proposal_id = $3
-                """, status, rejection_reason, prop["proposal_id"])
+                """, status, ev.rejection_reason, ev.proposal_id)
 
     logger.info(f"Promotion Engine processed staging: {results}")
     return results

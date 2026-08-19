@@ -144,23 +144,46 @@ class NarrativeManager:
             self._dirty_ids.add(thread_id)
 
     async def flush_updates(self) -> None:
-        """Batch update last_active_turn and last_modified_at for all attended threads."""
+        """Batch update last_active_turn and last_modified_at for all attended threads.
+
+        Transaction-safe: attempt to update all dirty ids in a single transaction.
+        On failure, retain the dirty set for retry and re-raise the exception so callers
+        can decide how to proceed.
+        """
         if not self._dirty_ids:
             return
+
         pool = await get_pool()
         if not pool:
             return
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                for tid in list(self._dirty_ids):
-                    thread = self._cache.get(tid)
-                    if thread:
-                        await conn.execute("""
+
+        dirty_ids = list(self._dirty_ids)
+
+        try:
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    for tid in dirty_ids:
+                        thread = self._cache.get(tid)
+                        if thread is None:
+                            continue
+                        await conn.execute(
+                            """
                             UPDATE narrative_threads
-                            SET last_active_turn = $1, last_modified_at = $2
+                            SET last_active_turn = $1,
+                                last_modified_at = $2
                             WHERE id = $3
-                        """, thread.last_active_turn, thread.last_modified_at, tid)
-                    self._dirty_ids.discard(tid)
+                            """,
+                            thread.last_active_turn,
+                            thread.last_modified_at,
+                            tid,
+                        )
+            self._dirty_ids.difference_update(dirty_ids)
+        except Exception:
+            logger.exception(
+                "Failed to flush %d narrative thread updates; dirty set retained",
+                len(dirty_ids),
+            )
+            raise
 
     async def update_thread(
         self,

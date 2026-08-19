@@ -57,7 +57,11 @@ class CuriosityGraph:
     ) -> str:
         """
         Add a curiosity node with session isolation and traceability.
-        Returns 'created', 'updated', 'skipped', or 'error'.
+        Returns the node ID (created, updated, or error).
+
+        CHANGED (2026-08-19): previously returned "created"/"updated" strings.
+        That broke callers (e.g., promote_contradiction_to_curiosity) that
+        expected a node ID. Now returns the actual ID.
         """
         async with self._lock:
             if self._graph is None:
@@ -74,7 +78,7 @@ class CuriosityGraph:
                     self._graph.nodes[node_id]["importance"] = importance
                     self._graph.nodes[node_id]["last_trace_id"] = origin_trace_id
                     self._graph.nodes[node_id]["last_referenced"] = datetime.now(timezone.utc).isoformat()
-                return "updated"
+                return node_id  # Return existing ID
 
             # Add new node
             self._graph.add_node(
@@ -88,20 +92,25 @@ class CuriosityGraph:
                 exploration_progress=0.0
             )
             await self._queue_sync()
-            return "created"
+            return node_id
 
     async def update_edge(self, node1: str, node2: str, delta: float = 0.05) -> None:
+        """
+        Update or create an edge between two nodes using their exact IDs.
+
+        CHANGED (2026-08-19): removed normalization (lower, strip, replace spaces).
+        The original code normalized IDs, which broke edges because curiosity node IDs
+        are hash/session-prefixed strings. Now uses exact IDs.
+        """
         async with self._lock:
             if self._graph is None:
                 return
-            n1 = node1.lower().strip().replace(" ", "_")
-            n2 = node2.lower().strip().replace(" ", "_")
-            if self._graph.has_edge(n1, n2):
-                current = self._graph[n1][n2].get("weight", 0.0)
-                self._graph[n1][n2]["weight"] = min(1.0, current + delta)
+            if self._graph.has_edge(node1, node2):
+                current = float(self._graph[node1][node2].get("weight", 0.0))
+                self._graph[node1][node2]["weight"] = min(1.0, current + delta)
             else:
-                self._graph.add_edge(n1, n2, weight=delta)
-        await self._queue_sync()
+                self._graph.add_edge(node1, node2, weight=max(0.0, min(1.0, delta)))
+            await self._queue_sync()
 
     async def observe_workspace(self, workspace_items: List[Any]) -> None:
         """

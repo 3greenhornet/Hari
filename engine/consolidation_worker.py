@@ -26,8 +26,31 @@ class ConsolidationManager:
     def __init__(self):
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
+        self._turn_event = asyncio.Event()
         self._session_id: Optional[str] = None
+        self._current_turn: int = 0
+        self._last_consolidation_turn: int = 0
         self._original_signal_handlers = {}
+
+    def update_turn(self, turn_count: int) -> None:
+        """Update the worker with the real conversation turn number.
+        Wakes the worker if the consolidation interval is reached.
+        """
+        if turn_count < self._current_turn:
+            logger.warning(
+                "Ignoring non-monotonic turn update: %s < %s",
+                turn_count,
+                self._current_turn,
+            )
+            return
+
+        self._current_turn = turn_count
+
+        if (
+            self._current_turn - self._last_consolidation_turn
+            >= CONSOLIDATION_INTERVAL_TURNS
+        ):
+            self._turn_event.set()
 
     async def start(self, session_id: str) -> None:
         """Start the background consolidation worker loop."""
@@ -37,98 +60,108 @@ class ConsolidationManager:
 
         self._session_id = session_id
         self._stop_event.clear()
+        self._turn_event.clear()
+        self._current_turn = 0
+        self._last_consolidation_turn = 0
         self._task = asyncio.create_task(self._run())
         logger.info(f"🧹 Consolidation worker started for session {session_id}")
 
-        # Signal handlers are set up in the main loop; they will call stop()
         self._setup_signal_handlers()
 
     async def _run(self) -> None:
-        """Main loop executing granular operations and shielding cleanups from strict timeouts."""
+        """Main loop: waits for turn events or stop signal."""
         try:
-            turn_counter = 0
-            last_consolidation_turn = 0
-
             while not self._stop_event.is_set():
-                try:
-                    await asyncio.wait_for(
-                        self._stop_event.wait(),
-                        timeout=CONSOLIDATION_INTERVAL_SECONDS,
-                    )
+                turn_wait = asyncio.create_task(self._turn_event.wait())
+                stop_wait = asyncio.create_task(self._stop_event.wait())
+
+                done, pending = await asyncio.wait(
+                    {turn_wait, stop_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for task in pending:
+                    task.cancel()
+
+                if self._stop_event.is_set():
                     break
-                except asyncio.TimeoutError:
-                    pass
 
-                turn_counter += CONSOLIDATION_INTERVAL_TURNS
+                self._turn_event.clear()
 
-                if turn_counter - last_consolidation_turn >= CONSOLIDATION_INTERVAL_TURNS:
-                    logger.debug("Running consolidation cycle...")
-                    try:
-                        result = await run_consolidation(self._session_id, turn_counter)
-                        if result.get("promoted_hypotheses", 0) > 0:
-                            logger.info(f"📈 Promoted {result['promoted_hypotheses']} new hypotheses")
-                        if result.get("archived_memories", 0) > 0:
-                            logger.info(f"🗄️ Archived {result['archived_memories']} old memories")
+                current_turn = self._current_turn
 
-                        # ---- Process staging proposals (Promotion Engine) ----
-                        try:
-                            from engine.promotions import process_staging_proposals
-                            promo_results = await process_staging_proposals(self._session_id, turn_counter)
-                            if promo_results.get("accepted", 0) > 0:
-                                logger.info(f"📈 Promoted {promo_results['accepted']} proposals from staging")
-                            if promo_results.get("contradictions_found", 0) > 0:
-                                logger.info(f"🔍 Found {promo_results['contradictions_found']} contradictions during evaluation")
-                        except Exception as e:
-                            logger.error(f"Staging processing failed: {e}")
+                if (
+                    current_turn - self._last_consolidation_turn
+                    < CONSOLIDATION_INTERVAL_TURNS
+                ):
+                    continue
 
-                        # ---- Detect contradictions from recent memories ----
-                        try:
-                            from engine.promotions import detect_contradictions_from_memories
-                            contradictions = await detect_contradictions_from_memories(
-                                self._session_id, turn_counter
-                            )
-                            if contradictions:
-                                logger.info(f"🔍 Found {len(contradictions)} contradictions from memories")
-                        except Exception as e:
-                            logger.error(f"Contradiction detection failed: {e}")
-
-                        # ---- Archive inactive structures ----
-                        try:
-                            from engine.promotions import archive_inactive_structures
-                            archived = await archive_inactive_structures(turn_counter)
-                            if archived > 0:
-                                logger.debug(f"🗄️ Archived {archived} inactive structures")
-                        except Exception as e:
-                            logger.error(f"Archival failed: {e}")
-
-                        graph_manager = await get_graph_manager()
-                        await graph_manager.decay(decay_factor=0.99)
-
-                        last_consolidation_turn = turn_counter
-                    except Exception as e:
-                        logger.error(f"❌ Consolidation cycle failed: {e}")
-
-            logger.info("Consolidation worker stopping gracefully via explicit trigger.")
+                await self._run_consolidation_cycle(current_turn)
+                self._last_consolidation_turn = current_turn
 
         except asyncio.CancelledError:
-            logger.info("Consolidation worker cancellation requested. Preserving final application state...")
-            # Shield the final DB writes from cancellation during loop shutdown
+            logger.info("Consolidation worker cancellation requested.")
+            final_turn = self._current_turn
             try:
-                await asyncio.shield(run_consolidation(self._session_id, 9999))
+                await asyncio.shield(
+                    run_consolidation(self._session_id, final_turn)
+                )
                 graph_manager = await get_graph_manager()
                 await asyncio.shield(graph_manager.decay(decay_factor=0.99))
-            except RuntimeError as e:
-                if "Event loop is closed" in str(e):
-                    logger.warning(f"⚠️ Loop already closed; final consolidation skipped: {e}")
-                else:
-                    logger.error(f"❌ Final consolidation failed: {e}")
             except Exception as e:
-                logger.error(f"❌ Final consolidation failed: {e}")
+                logger.error(f"Final consolidation failed: {e}")
             raise
         except Exception as e:
-            logger.error(f"❌ Consolidation worker fatal error: {e}")
+            logger.error(f"Consolidation worker fatal error: {e}")
         finally:
             self._restore_signal_handlers()
+
+    async def _run_consolidation_cycle(self, turn_counter: int) -> None:
+        """Run a single consolidation cycle with the given real turn."""
+        logger.debug("Running consolidation cycle...")
+        try:
+            result = await run_consolidation(self._session_id, turn_counter)
+            if result.get("promoted_hypotheses", 0) > 0:
+                logger.info(f"📈 Promoted {result['promoted_hypotheses']} new hypotheses")
+            if result.get("archived_memories", 0) > 0:
+                logger.info(f"🗄️ Archived {result['archived_memories']} old memories")
+
+            # ---- Process staging proposals (Promotion Engine) ----
+            try:
+                from engine.promotions import process_staging_proposals
+                promo_results = await process_staging_proposals(self._session_id, turn_counter)
+                if promo_results.get("accepted", 0) > 0:
+                    logger.info(f"📈 Promoted {promo_results['accepted']} proposals from staging")
+                if promo_results.get("contradictions_found", 0) > 0:
+                    logger.info(f"🔍 Found {promo_results['contradictions_found']} contradictions during evaluation")
+            except Exception as e:
+                logger.error(f"Staging processing failed: {e}")
+
+            # ---- Detect contradictions from recent memories ----
+            try:
+                from engine.promotions import detect_contradictions_from_memories
+                contradictions = await detect_contradictions_from_memories(
+                    self._session_id, turn_counter
+                )
+                if contradictions:
+                    logger.info(f"🔍 Found {len(contradictions)} contradictions from memories")
+            except Exception as e:
+                logger.error(f"Contradiction detection failed: {e}")
+
+            # ---- Archive inactive structures ----
+            try:
+                from engine.promotions import archive_inactive_structures
+                archived = await archive_inactive_structures(turn_counter)
+                if archived > 0:
+                    logger.debug(f"🗄️ Archived {archived} inactive structures")
+            except Exception as e:
+                logger.error(f"Archival failed: {e}")
+
+            graph_manager = await get_graph_manager()
+            await graph_manager.decay(decay_factor=0.99)
+
+        except Exception as e:
+            logger.error(f"❌ Consolidation cycle failed: {e}")
 
     async def stop(self, timeout: float = 10.0) -> bool:
         """Gracefully request loop exit and clear references cleanly."""
@@ -139,7 +172,6 @@ class ConsolidationManager:
         self._stop_event.set()
 
         try:
-            # Use shield to protect the wait for task completion
             await asyncio.wait_for(asyncio.shield(self._task), timeout=timeout)
             return True
         except asyncio.TimeoutError:
@@ -160,7 +192,6 @@ class ConsolidationManager:
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
                 self._original_signal_handlers[sig] = signal.getsignal(sig)
-                # Signal handler sets the event; actual shutdown is driven by the main loop
                 loop.add_signal_handler(
                     sig,
                     lambda s=sig: asyncio.create_task(self._handle_shutdown_signal(s))

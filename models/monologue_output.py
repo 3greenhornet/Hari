@@ -2,13 +2,49 @@
 """
 Phase 5: Pure sensory monologue output – no command flags.
 The LLM becomes a sensory organ, reporting perceptions.
+
+CHANGES (2026-08-19):
+- Removed duplicate InternalCandidate definition (was overwriting enhanced version)
+- Added provenance fields to InternalCandidate: intrinsic_relevance, persistence, activation_reason
+- Added cognitive state descriptors to MonologueOutput: internal_momentum, self_relevance, social_salience
+- All original fields preserved for backward compatibility
 """
 
 from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
 
+# --- InternalCandidate (ENHANCED, only one definition) ---
+# ORIGINAL: Had only content, urgency, source.
+# ENHANCED: Added provenance fields so we can track why a thought surfaced,
+#           how strong it is intrinsically, and how much it was already active.
+#           This enables the attention system to give internal thoughts a fair vote.
+class InternalCandidate(BaseModel):
+    content: str
+    urgency: float = Field(default=0.5, ge=0.0, le=1.0)
+    source: Optional[str] = None   # not required – classification is optional
+
+    # NEW: Provenance fields (added 2026-08-19)
+    intrinsic_relevance: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="How relevant this thought is to Hari's own cognitive field"
+    )
+    persistence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="How much this thought was already active before the incoming event"
+    )
+    activation_reason: Optional[str] = Field(
+        default=None,
+        description="What caused this thought to surface (e.g., 'memory_association', 'unresolved_question')"
+    )
+
+
 class HypothesisProposal(BaseModel):
+    type: Literal["user", "self", "world"]
     statement: str
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     information_gap: float = Field(default=0.3, ge=0.0, le=1.0)
@@ -32,46 +68,56 @@ class CandidateArtifact(BaseModel):
     urgency: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+# NOTE: The duplicate InternalCandidate definition that was here has been removed.
+# There was a second definition (lines 50-53 in the old file) that overwrote the
+# enhanced version. This caused `intrinsic_relevance`, `persistence`, and
+# `activation_reason` to be silently stripped from internal candidates.
+# The single definition above is now the only one.
+
+
 class MonologueOutput(BaseModel):
     """Pure sensory report – no internal decisions, only perceptions."""
 
-    # User intent perception
+    # --- User intent perception (kept for backward compatibility) ---
+    # ORIGINAL: perceived_user_intent was the primary way to interpret the user.
+    # NOW: This field is kept for compatibility, but social_cognition.py no longer
+    # uses it to drive state updates. The system now uses interaction-event synthesis
+    # instead of intent-driven updates.
     perceived_user_intent: Literal["curious", "avoiding", "testing", "help_seeking", "sharing", "derailing", "disagreeing"] = Field(
         default="sharing"
     )
     intent_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
-    # Thematic continuity (float, not binary)
+    # --- Thematic continuity ---
     thematic_continuity: float = Field(
         default=1.0, ge=0.0, le=1.0,
         description="0.0 = complete rupture, 1.0 = seamless continuation"
     )
 
-    # User engagement estimate
+    # --- User engagement estimate (kept for compatibility) ---
     user_engagement_estimate: float = Field(default=0.5, ge=0.0, le=1.0)
 
-    # Interruption severity
+    # --- Interruption severity ---
     interruption_severity: float = Field(
         default=0.0, ge=0.0, le=1.0,
         description="0 = no interruption, 1 = complete derailment"
     )
 
-    # Dynamic candidates for workspace (optional)
+    # --- Dynamic candidates ---
     dynamic_candidates: List[CandidateArtifact] = Field(default_factory=list)
 
-    # Optional: still keep curiosity trigger as string
-    curiosity_trigger: Optional[str] = None
+    # --- Internal candidates (now with provenance) ---
+    internal_candidates: List[InternalCandidate] = Field(default_factory=list)
 
-    # Optional: structured proposals
+    # --- Optional fields ---
+    curiosity_trigger: Optional[str] = None
     hypothesis_proposal: Optional[HypothesisProposal] = None
     self_belief_proposal: Optional[SelfBeliefProposal] = None
-
-    # Optional: memory association
     triggered_memory_summary: Optional[str] = None
     memory_significance: float = Field(default=0.5, ge=0.0, le=1.0)
     memory_emotional_tone: Literal["neutral", "positive", "negative", "curious", "frustrated"] = "neutral"
 
-    # Ticket 014: Conversation trajectory analysis
+    # --- Trajectory analysis ---
     trajectory_deviation: float = Field(
         default=0.0,
         ge=0.0,
@@ -89,7 +135,38 @@ class MonologueOutput(BaseModel):
         description="ID of the thread the user appears to be deviating from (if any)"
     )
 
+    # --- Thought continuation ---
+    thought_continuation_urge: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="How strongly Hari's current unfinished cognition wants to remain active"
+    )
+
+    # --- NEW: Hari's own cognitive state descriptors (added 2026-08-19) ---
+    # These fields describe Hari's internal cognitive momentum, not the user.
+    # They are used by the attention system to give internal thoughts a fair vote.
+    internal_momentum: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="How much cognitive momentum Hari already has (unresolved thoughts, curiosity, completion)"
+    )
+    self_relevance: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="How relevant the incoming event is to Hari's own identity, beliefs, or self‑questions"
+    )
+    social_salience: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="How socially salient the incoming event is (interruption, topic shift, etc.)"
+    )
+
     def has_substantive_changes(self) -> bool:
+        """Original method – unchanged."""
         return (
             self.intent_confidence > 0.6 or
             self.thematic_continuity < 0.8 or

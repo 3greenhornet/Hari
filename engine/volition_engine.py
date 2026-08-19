@@ -91,23 +91,9 @@ class VolitionEngine:
         candidates = []
         for desire in self._desires:
             if desire.base_tension > 0.1:
-                if desire.type == "assert_boundary":
-                    content = (
-                        f"I'm noticing a pattern in this conversation — repeated requests with little "
-                        f"reciprocal engagement (engagement: {desire.source_tension_id})."
-                    )
-                elif desire.type == "share":
-                    # COMPROMISE: Until Phase 3 wires actual DB IDs, use a generic template for sharing.
-                    content = "I feel a strong urge to share a perspective or unfinished thought I've been holding."
-                else:
-                    # No concrete object to reference — skip rather than emit a hollow template string
-                    continue
-                candidates.append({
-                    "id": f"desire_{desire.desire_id}",
-                    "content": content,
-                    "urgency": desire.base_tension,
-                    "item_type": "open_thought"
-                })
+                # No concrete target yet – skip all generic desires
+                # Future: bind desires to actual cognitive objects
+                continue
         self._desires.clear()
         return candidates
 

@@ -168,6 +168,10 @@ async def _compute_pressure_field(
     else:
         pressures["coherence_tension"] = 0.0
 
+    # Intrinsic relevance (from internal candidates)
+    intrinsic_relevance = float(candidate.get("intrinsic_relevance", 0.0))
+    pressures["intrinsic_relevance"] = min(1.0, max(0.0, intrinsic_relevance))
+
     return pressures
 
 
@@ -268,49 +272,26 @@ def _softmax(scores: List[float], temperature: float) -> List[float]:
 
 
 def broadcast_feedback(elected: List[WorkspaceItem], state: HariState) -> None:
-    """
-    Ticket 013: Strengthened feedback using asymptotic updates.
-    
-    Ecology Signals Contract:
-    - information_gap: How much uncertainty this candidate resolves
-    - closure_pressure: How urgently this candidate needs resolution
-    - coherence_factor: How well this candidate integrates with current cognition
-    
-    All signals are optional. Missing signals default to 0.0.
-    Coefficients are calibrated and documented in ATTENTION_COEFFICIENTS.md.
+    """Broadcast workspace composition back into state drives using source-dependent ratios.
+
+    This makes the feedback sensitive to the types and provenance of elected items.
     """
     if not elected:
         return
+
     n = len(elected)
 
-    # Aggregate ecology signals from payloads (optional, default 0.0)
-    curiosity_signal = sum(item.payload.get("information_gap", 0.0) for item in elected) / n
-    completion_signal = sum(item.payload.get("closure_pressure", 0.0) for item in elected) / n
-    coherence_signal = sum(item.payload.get("coherence_factor", 0.0) for item in elected) / n
-    
-    diversity_signal = len({item.item_type for item in elected}) / max(n, 1)
+    curiosity_ratio = sum(1 for item in elected if item.item_type == "curiosity_node") / n
+    narrative_ratio = sum(1 for item in elected if item.item_type == "narrative_thread") / n
+    internal_ratio = sum(1 for item in elected if item.payload.get("source") == "internal_cognition") / n
+    memory_ratio = sum(1 for item in elected if item.item_type == "memory") / n
 
-    # V1 Coefficients (Ticket 013 calibration)
-    # curiosity: 0.15  | completion: 0.15  | coherence: 0.10  | arousal: 0.05
     state.update({
-        "curiosity": curiosity_signal * 0.15,
-        "completion": completion_signal * 0.15,
-        "coherence": coherence_signal * 0.10,
-        "arousal": diversity_signal * 0.05,
+        "curiosity": curiosity_ratio * 0.40,
+        "completion": narrative_ratio * 0.30,
+        "coherence": (narrative_ratio * 0.25 + internal_ratio * 0.20),
+        "momentum": (internal_ratio * 0.35 + curiosity_ratio * 0.20),
     }, source="BROADCAST", reason="workspace_feedback")
-
-    # Debug validation (only in development)
-    if __debug__:
-        for item in elected:
-            has_signal = any(
-                key in item.payload 
-                for key in ["information_gap", "closure_pressure", "coherence_factor"]
-            )
-            if not has_signal:
-                logger.debug(
-                    f"Candidate {item.id} ({item.item_type}) has no ecology signals. "
-                    f"This contributes 0.0 to broadcast_feedback."
-                )
 
 
 # -----------------------------------------------------------------------------
@@ -430,20 +411,28 @@ async def load_workspace(
         })
     # Add open threads
     for ot in open_threads:
-        urgency = ot.get("urgency", 0.5)
+        urgency = float(ot.get("urgency", 0.5))
         item_type = ot.get("item_type", "open_thought")
-        
-        # Derive coherence_factor from urgency (no type-specific rules)
         coherence_factor = urgency * 0.6
-        
-        add_candidate(item_type, ot.get("id", "unknown"), {
+
+        payload = {
             "content": ot.get("content", ""),
             "urgency": urgency,
             "id": ot.get("id"),
-            "information_gap": 0.1,
-            "closure_pressure": urgency,
-            "coherence_factor": coherence_factor,
-        })
+            "information_gap": float(ot.get("information_gap", 0.1)),
+            "closure_pressure": float(ot.get("closure_pressure", urgency)),
+            "coherence_factor": float(ot.get("coherence_factor", coherence_factor)),
+        }
+
+        # PRESERVE INTERNAL METADATA
+        for key in [
+            "source", "internal_source", "internal_activation", "intrinsic_relevance",
+            "persistence", "activation_reason", "origin", "activated_by"
+        ]:
+            if key in ot:
+                payload[key] = ot[key]
+
+        add_candidate(item_type, ot.get("id", "unknown"), payload)
     
 
     # 3. Add previous workspace items with decayed activation (attentional inertia)
@@ -453,13 +442,25 @@ async def load_workspace(
             old_item.metrics.activation *= 0.85
             if old_item.metrics.activation < 0.05:
                 continue
-            # Convert back to candidate dict
+            # Convert back to candidate dict and preserve internal metadata for inertia
             cand_dict = {
                 "item_type": old_item.item_type,
                 "content": old_item.content,
                 "embedding": old_item.payload.get("embedding"),
                 "urgency": old_item.payload.get("urgency", 0.5),
                 "id": old_item.id,
+                # Preserve internal metadata
+                "source": old_item.payload.get("source"),
+                "internal_source": old_item.payload.get("internal_source"),
+                "internal_activation": float(old_item.payload.get("internal_activation", 0.0)),
+                "intrinsic_relevance": float(old_item.payload.get("intrinsic_relevance", 0.0)),
+                "persistence": float(old_item.payload.get("persistence", 0.0)),
+                "activation_reason": old_item.payload.get("activation_reason"),
+                "origin": old_item.payload.get("origin"),
+                "activated_by": old_item.payload.get("activated_by"),
+                "information_gap": float(old_item.payload.get("information_gap", 0.0)),
+                "closure_pressure": float(old_item.payload.get("closure_pressure", 0.0)),
+                "coherence_factor": float(old_item.payload.get("coherence_factor", 0.0)),
             }
             add_candidate(old_item.item_type, old_item.id, cand_dict)
 
@@ -534,6 +535,21 @@ async def load_workspace(
     # One candidate becomes the current focus; additional candidates
     # become supporting context.
     # ------------------------------------------------------------------
+
+    # Determine softmax temperature and probabilities for telemetry.
+    scores_all = [enriched_candidates[i][0] for i in range(len(enriched_candidates))]
+    # Temperature driven by dominance (low dominance -> higher temp) and coherence
+    temperature = max(
+        0.05,
+        min(
+            1.0,
+            0.4 + (1.0 - getattr(state, "dominance", 0.5)) * 0.3 + (1.0 - getattr(state, "coherence", 0.5)) * 0.3,
+        ),
+    )
+    try:
+        probabilities = _softmax(scores_all, temperature)
+    except Exception:
+        probabilities = [1.0 / len(scores_all)] * len(scores_all)
 
     # Rank all candidates by salience descending.
     ranked_indices = sorted(

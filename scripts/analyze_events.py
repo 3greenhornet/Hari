@@ -13,6 +13,9 @@ import os
 from typing import List, Dict, Any
 from collections import defaultdict
 from datetime import datetime
+from enum import Enum
+import math
+import statistics
 
 
 def load_events(file_path: str) -> List[Dict[str, Any]]:
@@ -58,15 +61,140 @@ def compute_mirroring(events: List[Dict[str, Any]]) -> float:
 
 
 def compute_initiative(events: List[Dict[str, Any]]) -> float:
-    """Compute initiative score: fraction of turns with curiosity trigger."""
-    curiosity_count = 0
-    total_turns = 0
+    """Compute initiative score: fraction of turns where the assistant initiated.
+
+    Uses workspace composition when available: if a workspace item is an
+    `open_thought`, `curiosity_node`, or `narrative_thread` and its `source`
+    indicates `volition` or `curiosity_spreading`, it's counted as an initiative.
+    Falls back to monologue curiosity_trigger when workspace data is missing.
+    """
+    def classify_initiative_from_comp(comp: List[Dict[str, Any]]) -> bool:
+        for item in comp or []:
+            itype = item.get("type") or item.get("item_type")
+            source = item.get("source")
+            if itype in ("open_thought", "curiosity_node", "narrative_thread"):
+                if source in ("volition", "curiosity_spreading"):
+                    return True
+        return False
+
+    # Build turns from events (match assistant_response -> workspace_composition)
+    turns = defaultdict(dict)
     for event in events:
-        if event["event_type"] == "monologue_output":
-            total_turns += 1
-            if event["payload"].get("curiosity_trigger"):
-                curiosity_count += 1
-    return curiosity_count / max(1, total_turns)
+        t = event.get("turn_number", 0)
+        if event["event_type"] == "assistant_response":
+            turns[t]["assistant_response"] = event["payload"].get("content")
+            turns[t]["workspace_composition"] = event["payload"].get("workspace_composition")
+        elif event["event_type"] == "monologue_output":
+            turns[t]["monologue"] = event["payload"]
+
+    total_turns = len(turns)
+    if total_turns == 0:
+        return 0.0
+
+    initiative_count = 0
+    for t, data in turns.items():
+        comp = data.get("workspace_composition")
+        if comp:
+            if classify_initiative_from_comp(comp):
+                initiative_count += 1
+                continue
+        # Fallback: use monologue curiosity trigger
+        mon = data.get("monologue")
+        if mon and mon.get("curiosity_trigger"):
+            initiative_count += 1
+
+    return initiative_count / max(1, total_turns)
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    try:
+        dot = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(y * y for y in b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return dot / (na * nb)
+    except Exception:
+        return 0.0
+
+
+def compute_topic_drift(events: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Compute topic drift distribution (mean, std) using available embeddings.
+
+    Expects per-turn embeddings to be present either in assistant_response payload
+    under `embedding` or in workspace_composition items. If embeddings are missing,
+    returns zeros.
+    """
+    # Collect embeddings per turn (prefer assistant_response.embedding)
+    turns = {}
+    for event in events:
+        if event["event_type"] == "assistant_response":
+            emb = event["payload"].get("embedding")
+            if emb:
+                turns[event.get("turn_number", 0)] = emb
+        # Also check workspace composition items
+        if event["event_type"] == "assistant_response":
+            comp = event["payload"].get("workspace_composition") or []
+            for item in comp:
+                if item.get("embedding"):
+                    # Use first available embedding for the turn if none set
+                    turns.setdefault(event.get("turn_number", 0), item.get("embedding"))
+
+    if len(turns) < 2:
+        return {"mean": 0.0, "std": 0.0}
+
+    ordered = [turns[t] for t in sorted(turns.keys())]
+    drifts = []
+    for i in range(len(ordered) - 1):
+        a = ordered[i]
+        b = ordered[i + 1]
+        cs = _cosine_similarity(a, b)
+        drifts.append(1.0 - cs)
+
+    if not drifts:
+        return {"mean": 0.0, "std": 0.0}
+    mean = sum(drifts) / len(drifts)
+    std = statistics.stdev(drifts) if len(drifts) > 1 else 0.0
+    return {"mean": mean, "std": std}
+
+
+class ConversationMove(Enum):
+    FOLLOW = "follow"
+    DEEPEN = "deepen"
+    ASSOCIATE = "associate"
+    PIVOT = "pivot"
+    JOKE = "joke"
+    CHALLENGE = "challenge"
+    REVISIT = "revisit"
+    SHARE = "share"
+    WANDER = "wander"
+
+
+def classify_move(workspace_composition: List[Dict[str, Any]], user_input: str, response: str) -> ConversationMove:
+    """Heuristic move classification based on simple cues.
+
+    This is intentionally lightweight; a fuller implementation would call an
+    LLM classifier or more advanced heuristics.
+    """
+    resp = (response or "").lower()
+    user = (user_input or "").lower()
+    types = {item.get("type") for item in (workspace_composition or [])}
+
+    if any(w in resp for w in ["lol", "haha", "😂", "joke"]):
+        return ConversationMove.JOKE
+    if "?" in resp and len(resp.split()) < 12:
+        return ConversationMove.FOLLOW
+    if any(t in types for t in ("curiosity_node", "narrative_thread")) and "i think" in resp:
+        return ConversationMove.DEEPEN
+    # Pivot detection: low word overlap between user and assistant
+    user_words = set(user.split())
+    resp_words = set(resp.split())
+    overlap = len(user_words.intersection(resp_words))
+    if user_words and overlap / max(1, len(user_words)) < 0.2:
+        return ConversationMove.PIVOT
+    if any(t == "open_thought" for t in types) and any(w in resp for w in ["i think", "i feel", "i believe"]):
+        return ConversationMove.SHARE
+    return ConversationMove.WANDER
 
 
 def compute_drive_movement(events: List[Dict[str, Any]]) -> float:

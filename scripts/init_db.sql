@@ -1,4 +1,7 @@
-﻿-- scripts/init_db.sql
+﻿-- scripts/init_db.sql docker exec -i hari-postgres psql -U postgres -d hari_cognitive -c "
+
+
+
 CREATE EXTENSION IF NOT EXISTS vector;
 
 DROP TABLE IF EXISTS memories CASCADE;

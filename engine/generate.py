@@ -6,6 +6,10 @@ import logging
 from typing import List, Dict, Any, Optional
 import litellm  # noqa
 from litellm import acompletion
+litellm.drop_params = True          # Strips presence_penalty for Mistral
+litellm.num_retries = 2              # Retry on rate limits
+# Network timeout for LLM calls (seconds)
+TIMEOUT = float(os.getenv("LITELLM_NETWORK_TIMEOUT", "8.0"))
 import copy
 import asyncio
 import hashlib
@@ -39,15 +43,28 @@ from engine.volition_engine import VolitionEngine
 # Free‑tier fallback chain (only models for which API keys are set)
 # -----------------------------------------------------------------------------
 _FALLBACK_CANDIDATES = [
+    # 1. Mistral – reliable small/fast option
+    (os.getenv("STAGE1_FALLBACK_3", "mistral/mistral-small-latest"), os.getenv("MISTRAL_API_KEY")),
+    # 2. OpenRouter – strong instruct models if key present
+    ("openrouter/meta-llama/llama-3.3-70b-instruct", os.getenv("OPENROUTER_API_KEY")),
+    # 3. Gemini – backup
     ("gemini/gemini-2.5-flash", os.getenv("GEMINI_API_KEY")),
-    ("groq/llama-3.1-8b-instant", os.getenv("GROQ_API_KEY")),
-    ("groq/llama-3.3-70b-versatile", os.getenv("GROQ_API_KEY")),
-    ("mistral/mistral-small-latest", os.getenv("MISTRAL_API_KEY")),
-    ("openrouter/meta-llama/llama-3.3-70b-instruct:free", os.getenv("OPENROUTER_API_KEY")),
+    # 4. Groq family – last resort
+    ("groq/openai/gpt-oss-20b", os.getenv("GROQ_API_KEY")),
+    ("groq/openai/gpt-oss-120b", os.getenv("GROQ_API_KEY")),
+    ("groq/qwen/qwen3.6-27b", os.getenv("GROQ_API_KEY")),
 ]
-FALLBACK_MODELS = [model for model, key in _FALLBACK_CANDIDATES if key]
 
+# Logger for module
 logger = logging.getLogger(__name__)
+
+# Only include models for which an API key is present; warn about skipped ones
+FALLBACK_MODELS = []
+for model, key in _FALLBACK_CANDIDATES:
+    if key and str(key).strip():
+        FALLBACK_MODELS.append(model)
+    else:
+        logger.warning(f"Skipping fallback target '{model}': API key missing or empty.")
 
 
 
@@ -70,7 +87,9 @@ class TurnPipeline:
         self.generativity_estimator = get_estimator()
         self.identity_model = IdentityModel()
         self.volition_engine = VolitionEngine()
-        
+        # Session-scoped NarrativeManager (avoid recreating per-turn)
+        self.narrative_manager = NarrativeManager(self.session_id)
+
         from engine.relational_manager import RelationalManager
         self.relational_manager = RelationalManager(user_id=session_id)
 
@@ -127,6 +146,47 @@ class TurnPipeline:
 
         return "\n\n".join(fragments)
 
+    async def _build_internal_associative_context(self, current_turn: int) -> dict:
+        context = {"self_beliefs": [], "curiosity_nodes": [], "active_threads": []}
+
+        try:
+            from db.connection import get_pool
+            pool = await get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch("""
+                        SELECT belief_text
+                        FROM self_beliefs
+                        WHERE is_active = TRUE
+                        ORDER BY created_at DESC
+                        LIMIT 5
+                    """)
+                    context["self_beliefs"] = [
+                        {"content": r["belief_text"], "confidence": 0.6}
+                        for r in rows
+                    ]
+        except Exception:
+            pass
+
+        try:
+            from engine.curiosity_graph import get_graph_manager
+            graph_mgr = await get_graph_manager()
+            nodes = await graph_mgr.get_top_nodes(limit=5)
+            context["curiosity_nodes"] = [
+                {"id": n["id"], "content": n.get("question", ""), "importance": float(n.get("importance", 0.5))}
+                for n in nodes
+            ]
+        except Exception:
+            pass
+
+        if hasattr(self, "_active_threads") and self._active_threads:
+            context["active_threads"] = [
+                {"id": t.id, "title": t.title, "description": t.description}
+                for t in self._active_threads[:3]
+            ]
+
+        return context
+
 
 
     def _run_background_log(self, coroutine) -> None:
@@ -149,42 +209,62 @@ class TurnPipeline:
                 drives_before_json = json.dumps(trace.drives_before)
                 drives_after_json = json.dumps(trace.drives_after)
 
-                await conn.execute("""
-                    INSERT INTO decision_traces (
-                        trace_id, session_id, turn_number, timestamp,
-                        model_used, system_prompt_version, temperature,
-                        user_input, reasoning_chain, generated_response,
-                        retrieved_candidate_count, selected_winner_count,
-                        drives_before, drives_after,
-                        perceived_user_intent, intent_confidence, thematic_continuity,
-                        prompt_tokens, completion_tokens, total_tokens, latency_ms,
-                        error
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, $20, $21, $22)
-                """,
-                    trace.trace_id, trace.session_id, trace.turn_number, trace.timestamp,
-                    trace.model_used, trace.system_prompt_version, trace.temperature,
-                    trace.user_input, trace.reasoning_chain, trace.generated_response,
-                    trace.retrieved_candidate_count, trace.selected_winner_count,
-                    drives_before_json, drives_after_json,
-                    trace.perceived_user_intent, trace.intent_confidence, trace.thematic_continuity,
-                    trace.metrics.prompt_tokens, trace.metrics.completion_tokens,
-                    trace.metrics.total_tokens, trace.metrics.latency_ms,
-                    trace.error
-                )
-
-                # Insert workspace items
-                for item in trace.workspace_items:
-                    await conn.execute("""
-                        INSERT INTO trace_workspace_items (
-                            trace_id, item_id, item_type, source,
-                            raw_score, final_score, attention_weight,
-                            content_snapshot, is_winner
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    """,
-                        trace.trace_id, item.item_id, item.item_type, item.source,
-                        item.raw_score, item.final_score, item.attention_weight,
-                        item.content_snapshot, item.is_winner
+                # Wrap main trace and workspace items in a transaction and use executemany
+                workspace_rows = [
+                    (
+                        trace.trace_id,
+                        item.item_id,
+                        item.item_type,
+                        item.source,
+                        item.raw_score,
+                        item.final_score,
+                        item.attention_weight,
+                        item.content_snapshot,
+                        item.is_winner,
+                        item.origin or "unknown",
+                        item.activated_by or "unknown",
+                        item.intrinsic_relevance or 0.0,
+                        item.persistence or 0.0,
                     )
+                    for item in trace.workspace_items
+                ]
+
+                async with conn.transaction():
+                    await conn.execute("""
+                        INSERT INTO decision_traces (
+                            trace_id, session_id, turn_number, timestamp,
+                            model_used, system_prompt_version, temperature,
+                            user_input, reasoning_chain, generated_response,
+                            retrieved_candidate_count, selected_winner_count,
+                            drives_before, drives_after,
+                            perceived_user_intent, intent_confidence, thematic_continuity,
+                            prompt_tokens, completion_tokens, total_tokens, latency_ms,
+                            error
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, $20, $21, $22)
+                    """,
+                        trace.trace_id, trace.session_id, trace.turn_number, trace.timestamp,
+                        trace.model_used, trace.system_prompt_version, trace.temperature,
+                        trace.user_input, trace.reasoning_chain, trace.generated_response,
+                        trace.retrieved_candidate_count, trace.selected_winner_count,
+                        drives_before_json, drives_after_json,
+                        trace.perceived_user_intent, trace.intent_confidence, trace.thematic_continuity,
+                        trace.metrics.prompt_tokens, trace.metrics.completion_tokens,
+                        trace.metrics.total_tokens, trace.metrics.latency_ms,
+                        trace.error
+                    )
+
+                    if workspace_rows:
+                        await conn.executemany(
+                            """
+                            INSERT INTO trace_workspace_items (
+                                trace_id, item_id, item_type, source,
+                                raw_score, final_score, attention_weight,
+                                content_snapshot, is_winner,
+                                origin, activated_by, intrinsic_relevance, persistence
+                            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                            """,
+                            workspace_rows,
+                        )
         except Exception as db_err:
             logger.error(f"CRITICAL: Failed to store DecisionTrace for turn {trace.turn_number}: {db_err}", exc_info=True)
                     
@@ -212,8 +292,7 @@ class TurnPipeline:
         active_thread_context_str = None
         self._active_threads = []
         try:
-            narrative_mgr = NarrativeManager(self.session_id)
-            self._active_threads = await narrative_mgr.load_active_threads(turn_count, limit=1)
+            self._active_threads = await self.narrative_manager.load_active_threads(turn_count, limit=1)
             if self._active_threads:
                 thread = self._active_threads[0]
                 questions = ", ".join(thread.open_questions) if thread.open_questions else "None"
@@ -241,12 +320,31 @@ class TurnPipeline:
         self._event_logger.log_state_snapshot(self.state)
 
         # Step 3: Run monologue with trajectory context
+        # Build internal associative context and pass into monologue
+        internal_context = await self._build_internal_associative_context(turn_count)
+
+        # Build identity context (not a candidate – just background salience)
+        identity_context = ""
+        if hasattr(self, "identity_model") and self.identity_model:
+            try:
+                projection = self.identity_model.project(context="reflection")
+                if projection:
+                    identity_context = (
+                        f"Self-understanding: {getattr(projection, 'self_narrative', '')}\n"
+                        f"Core commitments: {', '.join(getattr(projection, 'core_commitments', []) or [])}\n"
+                        f"Active self-questions: {', '.join(getattr(projection, 'active_self_questions', []) or [])}"
+                    )
+            except Exception:
+                identity_context = ""
+
         monologue_output = await run_monologue(
             user_input,
             self.state,
             candidates,
             prediction_error=surprise,
             active_thread_context=active_thread_context_str,
+            internal_context=internal_context,
+            identity_context=identity_context,
         )
         logger.info(f"MONOLOGUE_RAW: {monologue_output.model_dump_json(indent=2)}")
         self._event_logger.log_monologue_output(monologue_output)
@@ -294,20 +392,7 @@ class TurnPipeline:
                 "completion": effective_signal * 0.2,
                 "cognitive_tension": effective_signal * 0.1
             }, source="MONOLOGUE", reason="trajectory_deviation")
-
-        # 2. Workspace Candidate Injection (with threshold for admission)
-        if deviation > 0.2 and confidence > 0.3:
-            urgency = deviation * confidence
-            thread_ref = monologue_output.referenced_thread_id or "active thread"
-            self._trajectory_candidate = {
-                "id": f"trajectory_{turn_count}",
-                "content": f"Conversation trajectory deviated from thread: {thread_ref} (deviation: {deviation:.2f}, confidence: {confidence:.2f})",
-                "urgency": urgency,
-                "item_type": "open_thought"
-            }
-        else:
-            self._trajectory_candidate = None
-
+        # Do not inject a pseudo-trajectory open_thought into workspace; keep only state updates
         if deviation > 0.3 and confidence > 0.4:
             logger.info(f"Trajectory deviation detected: {deviation:.2f} (confidence: {confidence:.2f})")
 
@@ -327,7 +412,7 @@ class TurnPipeline:
                                 confidence_estimate
                             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                         """,
-                            str(uuid.uuid4()), self.session_id, 'hypothesis', proposal.statement,
+                            str(uuid.uuid4()), self.session_id, proposal.type, proposal.statement,
                             'monologue', trace_id or str(uuid.uuid4()), turn_count,
                             proposal.information_gap, proposal.closure_pressure, proposal.coherence_factor,
                             proposal.confidence
@@ -374,6 +459,17 @@ class TurnPipeline:
         workspace_items, telemetry = await self._allocate_workspace(
             user_input, candidates, monologue_output, surprise, turn_count, proactive_candidates=proactive_candidates
         )
+
+        # Mark attended narrative threads
+        for item in workspace_items:
+            if item.item_type == "narrative_thread":
+                thread_id = item.payload.get("id") or item.source
+                if thread_id:
+                    try:
+                        self.narrative_manager.mark_attended(thread_id, turn_count)
+                    except Exception:
+                        logger.debug(f"Failed to mark narrative thread {thread_id} attended")
+
         workspace_summary = []
         for item in workspace_items[:5]:
             workspace_summary.append({
@@ -489,14 +585,13 @@ class TurnPipeline:
             monologue_output.thematic_continuity is not None and
             monologue_output.thematic_continuity > 0.7):
             try:
-                narrative_mgr = NarrativeManager(self.session_id)
-                existing_threads = await narrative_mgr.load_active_threads(turn_count)
+                existing_threads = await self.narrative_manager.load_active_threads(turn_count)
                 similar_exists = any(
                     thread.title.lower() in monologue_output.curiosity_trigger.lower()
                     for thread in existing_threads
                 )
                 if not similar_exists:
-                    await narrative_mgr.create_thread(
+                    await self.narrative_manager.create_thread(
                         title=monologue_output.curiosity_trigger[:50],
                         description=monologue_output.curiosity_trigger,
                         current_turn=turn_count,
@@ -569,53 +664,33 @@ class TurnPipeline:
 
         presence_penalty = 0.0  # Not applying until we understand the relationship
 
-        # 3. The workspace winner is Hari's current cognitive center
+        # --- DIALOGUE FRAMING SIMPLIFIED (2026-08-19) ---
+        # Replace heuristic labels with raw attentional material.
         winner = workspace_items[0] if workspace_items else None
+        active_thought = winner.content[:500] if winner and winner.content else ""
+        active_type = winner.item_type if winner else "none"
+        winner_source = winner.payload.get("source", "") if winner else ""
+        winner_internal_source = winner.payload.get("internal_source", "") if winner else ""
 
-        active_thought = (
-            winner.content[:300]
-            if winner is not None and winner.content
-            else ""
-        )
+        # Build context from top 3 workspace items (Labels removed to prevent parroting)
+        context_string = ""
+        for item in workspace_items[:3]:
+            context_string += f"\n- {item.content[:200]}"
 
-        active_type = (
-            winner.item_type
-            if winner is not None
-            else "none"
-        )
-
-        # 4. Determine whether Hari's own cognition has strong momentum
-        internal_pressure = (
-            self.state.completion +
-            self.state.curiosity
-        )
-
-        cognitive_tension = getattr(
-            self.state,
-            "cognitive_tension",
-            0.0,
-        )
-
-        user_pull = 1.0 - cognitive_tension
-
-        autonomous_focus = (
-            internal_pressure > 1.2
-            and user_pull < 0.4
-            and bool(active_thought)
-        )
-
-        # 5. Present the conversation as a social event
+        # Invert framing: Hari's cognition comes first, user input is a sensory event
         conversation_payload = (
-            "PARTICIPANT UTTERANCE:\n"
+            "HARI'S ACTIVE COGNITIVE CENTER:\n"
+            f"{context_string}\n\n"
+            "INCOMING SENSORY EVENT FROM PARTICIPANT:\n"
             f"{user_input}\n\n"
-            "HARI'S CURRENT COGNITIVE CENTER:\n"
-            f"type: {active_type}\n"
-            f"content: {active_thought or 'none'}\n\n"
-            "HARI'S INTERNAL ATTENTIONAL CONDITION:\n"
-            f"autonomous_focus: {autonomous_focus}\n"
-            f"internal_pressure: {internal_pressure:.3f}\n"
-            f"user_pull: {user_pull:.3f}"
+            "Generate Hari's next utterance naturally emerging from this state."
         )
+
+        # --- REMOVED: heuristic labels (2026-08-19) ---
+        # autonomous_focus = ...
+        # internal_pressure = ...
+        # user_pull = ...
+        # These were removed to avoid instructing the LLM on when to be autonomous.
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -658,7 +733,7 @@ class TurnPipeline:
                     messages=messages,
                     temperature=temperature,
                     presence_penalty=presence_penalty,
-                    timeout=5,
+                    timeout=TIMEOUT,
                     num_retries=0,
                     max_tokens=max_tokens,
                 )
@@ -756,17 +831,14 @@ class TurnPipeline:
             narrative_threads = self._active_threads
         else:
             try:
-                narrative_mgr = NarrativeManager(self.session_id)
-                narrative_threads = await narrative_mgr.load_active_threads(current_turn)
+                narrative_threads = await self.narrative_manager.load_active_threads(current_turn)
             except Exception as e:
                 logger.debug(f"Narrative manager not ready: {e}")
 
         # 5. Open threads – injected only from DB, monologue, volition, or endogenous mechanisms
         open_threads: List[Dict] = []
 
-        # Ticket 014: Inject trajectory candidate if detected
-        if hasattr(self, "_trajectory_candidate") and self._trajectory_candidate:
-            open_threads.append(self._trajectory_candidate)
+        # Ticket 014: Do not inject trajectory pseudo-thoughts into open_threads
 
         # Inject volition-driven candidates
         if proactive_candidates:
@@ -833,6 +905,26 @@ class TurnPipeline:
                         "item_type": "open_thought"
                     })
 
+        # Inject internal candidates from monologue (preserve provenance and metadata)
+        for candidate in getattr(monologue, "internal_candidates", []):
+            content = candidate.content.strip()
+            if not content:
+                continue
+            open_threads.append({
+                "id": f"internal_{uuid.uuid4()}",
+                "content": content,
+                "urgency": candidate.urgency,
+                "item_type": "open_thought",
+                "source": "internal_cognition",
+                "internal_source": candidate.source,      # preserved, may be None
+                "internal_activation": float(getattr(candidate, "urgency", 0.0)),
+                "intrinsic_relevance": float(getattr(candidate, "intrinsic_relevance", getattr(candidate, "urgency", 0.0) * 0.8)),
+                "persistence": float(getattr(candidate, "persistence", 0.0)),
+                "activation_reason": getattr(candidate, "activation_reason", None),
+                "origin": "internal_cognition",
+                "activated_by": f"turn_{current_turn}",
+            })
+
         # 7. Run core attention competition
         workspace_items, telemetry = await load_workspace(
             memories=memory_candidates,
@@ -857,7 +949,8 @@ class TurnPipeline:
     
 
     async def _store_assistant_memory(self, dialogue: str, turn_count: int, significance_override: Optional[float] = None):
-        if dialogue == "...":
+        # Skip if dialogue is empty or just ellipsis
+        if not dialogue or not dialogue.strip() or dialogue.strip() == "...":
             return
         try:
             significance = significance_override if significance_override is not None else 0.5
@@ -867,7 +960,7 @@ class TurnPipeline:
                 session_id=self.session_id,
                 turn_number=turn_count,
                 role="assistant",
-                content=dialogue,
+                content=dialogue.strip(),
                 significance=significance,
                 meaning_summary=""
             )

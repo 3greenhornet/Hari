@@ -1,0 +1,11 @@
+{
+  "session_id": "baseline_20260817_203441",
+  "total_events": 44,
+  "total_turns": 6,
+  "mirroring": 0.08653846153846154,
+  "initiative": 0.3333333333333333,
+  "drive_movement": 0.0017257193383099633,
+  "workspace_diversity": 0.4666666666666667,
+  "avg_response_length": 101.66666666666667,
+  "timestamp": "2026-08-17T20:36:24.036337"
+}
