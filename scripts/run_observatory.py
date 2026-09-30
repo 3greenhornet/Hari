@@ -4,6 +4,9 @@ import json
 import os
 import sys
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -86,19 +89,23 @@ async def run_observatory():
     # =====================================================================
     from db.connection import get_pool
     pool = await get_pool()
-    if pool:
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                TRUNCATE memories CASCADE;
-                TRUNCATE curiosity_nodes CASCADE;
-                TRUNCATE curiosity_edges CASCADE;
-                TRUNCATE hypotheses CASCADE;
-                TRUNCATE self_beliefs CASCADE;
-                TRUNCATE narrative_threads CASCADE;
-                TRUNCATE decision_traces CASCADE;
-                TRUNCATE trace_workspace_items CASCADE;
-            """)
-            print("🧹 All previous session data cleared. Fresh start.")
+    if pool is None:
+        raise RuntimeError(
+            "Observatory requires a working DATABASE_URL; database initialization failed."
+        )
+
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            TRUNCATE memories CASCADE;
+            TRUNCATE curiosity_nodes CASCADE;
+            TRUNCATE curiosity_edges CASCADE;
+            TRUNCATE hypotheses CASCADE;
+            TRUNCATE self_beliefs CASCADE;
+            TRUNCATE narrative_threads CASCADE;
+            TRUNCATE decision_traces CASCADE;
+            TRUNCATE trace_workspace_items CASCADE;
+        """)
+        print("🧹 All previous session data cleared. Fresh start.")
 
     # Reinitialize the curiosity graph in memory so it drops the old 91 nodes
     from engine.curiosity_graph import get_graph_manager

@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import List, Optional
 
+
 class WorkspaceItemTrace(BaseModel):
     item_id: str
     item_type: str
@@ -12,18 +13,18 @@ class WorkspaceItemTrace(BaseModel):
     attention_weight: float
     content_snapshot: str
     is_winner: bool
-    
-    # NEW: provenance fields
-    origin: Optional[str] = None          # where did this candidate come from?
-    activated_by: Optional[str] = None    # which event activated it?
+    origin: Optional[str] = None
+    activated_by: Optional[str] = None
     intrinsic_relevance: float = Field(default=0.0)
     persistence: float = Field(default=0.0)
+
 
 class Metrics(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     latency_ms: float = 0.0
+
 
 class DecisionTrace(BaseModel):
     trace_id: str
@@ -46,3 +47,7 @@ class DecisionTrace(BaseModel):
     workspace_items: List[WorkspaceItemTrace] = Field(default_factory=list)
     metrics: Metrics = Field(default_factory=Metrics)
     error: Optional[str] = None
+
+    # Behavior fields (added 2026-08-21)
+    behavior_mode: Optional[str] = None
+    behavior_source: Optional[str] = None

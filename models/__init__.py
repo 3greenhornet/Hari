@@ -5,6 +5,7 @@ from .hypothesis import Hypothesis
 from .curiosity_node import CuriosityNode
 from .narrative import NarrativeThread
 from .monologue_output import MonologueOutput
+from .stance import CognitiveStance
 
 # Identity layer
 from .identity import IdentityModel, ConstitutionModel, OriginModel, SelfModel, PerspectiveShift

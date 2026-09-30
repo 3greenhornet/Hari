@@ -41,7 +41,7 @@ __all__ = [
 
 class ExtractedHypothesis(BaseModel):
     """Pydantic model for hypothesis extraction from significant memories."""
-    type: Literal["user", "self", "world"] = Field(
+    type: Literal["other", "self", "world"] = Field(
         description="The category of the belief or observation."
     )
     statement: str = Field(

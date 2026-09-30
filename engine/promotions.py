@@ -423,7 +423,7 @@ async def process_staging_proposals(session_id: str, current_turn: int) -> Dict[
         contradiction_severity = 0.0
 
         # Determine if this is a hypothesis type
-        is_hypothesis = prop["proposal_type"] in ("user", "self", "world")
+        is_hypothesis = prop["proposal_type"] in ("other", "self", "world")
 
         if combined >= PROMOTION.staging_confidence_threshold and is_hypothesis:
             # Check contradictions only against same-type hypotheses
@@ -477,7 +477,7 @@ async def process_staging_proposals(session_id: str, current_turn: int) -> Dict[
             for ev in evaluations:
                 if ev.accepted:
                     status = 'accepted'
-                    if ev.proposal_type in ("user", "self", "world"):
+                    if ev.proposal_type in ("other", "self", "world"):
                         # Hypothesis
                         await conn.execute("""
                             INSERT INTO hypotheses (type, statement, confidence, supporting_event_ids, last_updated)

@@ -1,6 +1,46 @@
 ﻿# hari/tests/test_state.py
 import pytest
+from models.memory_event import MemoryEvent
 from psyche.state import HariState
+from engine.memory import (
+    compute_actr_base_level_activation,
+    compute_full_actr_activation,
+    compute_somatic_bonus,
+)
+
+
+def test_memory_event_tracks_somatic_markers():
+    event = MemoryEvent(
+        session_id="s1",
+        turn_number=1,
+        role="user",
+        content="example",
+        valence=0.4,
+        arousal=0.7,
+    )
+    assert event.valence == 0.4
+    assert event.arousal == 0.7
+
+
+def test_actr_helpers():
+    base = compute_actr_base_level_activation(usage_count=3, turns_since_last_retrieval=2)
+    assert base > -10.0
+
+    class DummyMemory:
+        turn_number = 10
+        usage_count = 3
+        embedding = [1.0, 0.0, 0.0]
+
+    activation = compute_full_actr_activation(
+        DummyMemory(),
+        current_turn=12,
+        query_embedding=[1.0, 0.0, 0.0],
+    )
+    assert activation is not None
+
+    bonus = compute_somatic_bonus(0.5, 0.6, 0.5, 0.6)
+    assert bonus >= 0.0
+
 
 def test_asymptotic_update():
     s = HariState()

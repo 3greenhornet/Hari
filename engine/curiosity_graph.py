@@ -142,6 +142,51 @@ class CuriosityGraph:
             nodes.sort(key=lambda x: x[1], reverse=True)
             return [{"id": n, "question": data.get("core_question", n), "importance": imp} for n, imp in nodes[:limit]]
 
+    async def spread_activation(
+        self, seed_ids: List[str], depth: int = 2, decay: float = 0.5, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        async with self._lock:
+            if self._graph is None:
+                return []
+            activated: Dict[str, float] = {}
+            frontier: Dict[str, float] = {}
+            for seed_id in seed_ids:
+                if seed_id in self._graph:
+                    activated[seed_id] = 1.0
+                    frontier[seed_id] = 1.0
+            for _ in range(depth):
+                if not frontier:
+                    break
+                next_frontier: Dict[str, float] = {}
+                for node_id, parent_activation in frontier.items():
+                    if node_id not in self._graph:
+                        continue
+                    for neighbor in self._graph.neighbors(node_id):
+                        edge_weight = float(self._graph[node_id][neighbor].get("weight", 0.1))
+                        child_activation = parent_activation * edge_weight * decay
+                        if child_activation <= 0.0:
+                            continue
+                        previous = activated.get(neighbor, 0.0)
+                        if child_activation > previous:
+                            activated[neighbor] = child_activation
+                            next_frontier[neighbor] = child_activation
+                frontier = next_frontier
+            results = []
+            seed_set = set(seed_ids)
+            for node_id, activation in activated.items():
+                if node_id in seed_set:
+                    continue
+                node_data = self._graph.nodes[node_id]
+                results.append({
+                    "id": node_id,
+                    "question": node_data.get("core_question", node_id),
+                    "importance": float(node_data.get("importance", 0.5)),
+                    "activation": float(activation),
+                    "session_id": node_data.get("session_id"),
+                })
+            results.sort(key=lambda item: item["activation"], reverse=True)
+            return results[:limit]
+
     async def decay(self, decay_factor: float = 0.99) -> None:
         async with self._lock:
             if self._graph is None:

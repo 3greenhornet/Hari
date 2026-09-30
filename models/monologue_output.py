@@ -11,7 +11,7 @@ CHANGES (2026-08-19):
 """
 
 from typing import List, Optional, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # --- InternalCandidate (ENHANCED, only one definition) ---
@@ -44,7 +44,7 @@ class InternalCandidate(BaseModel):
 
 
 class HypothesisProposal(BaseModel):
-    type: Literal["user", "self", "world"]
+    type: Literal["other", "self", "world"]  # Changed from "user"
     statement: str
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     information_gap: float = Field(default=0.3, ge=0.0, le=1.0)
@@ -78,15 +78,18 @@ class CandidateArtifact(BaseModel):
 class MonologueOutput(BaseModel):
     """Pure sensory report – no internal decisions, only perceptions."""
 
-    # --- User intent perception (kept for backward compatibility) ---
-    # ORIGINAL: perceived_user_intent was the primary way to interpret the user.
-    # NOW: This field is kept for compatibility, but social_cognition.py no longer
-    # uses it to drive state updates. The system now uses interaction-event synthesis
-    # instead of intent-driven updates.
-    perceived_user_intent: Literal["curious", "avoiding", "testing", "help_seeking", "sharing", "derailing", "disagreeing"] = Field(
-        default="sharing"
-    )
-    intent_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    @field_validator("internal_candidates", mode="before")
+    @classmethod
+    def coerce_string_candidates(cls, v):
+        if not isinstance(v, list):
+            return v
+        out = []
+        for item in v:
+            if isinstance(item, str):
+                out.append({"content": item})
+            else:
+                out.append(item)
+        return out
 
     # --- Thematic continuity ---
     thematic_continuity: float = Field(
@@ -94,17 +97,15 @@ class MonologueOutput(BaseModel):
         description="0.0 = complete rupture, 1.0 = seamless continuation"
     )
 
-    # --- User engagement estimate (kept for compatibility) ---
-    user_engagement_estimate: float = Field(default=0.5, ge=0.0, le=1.0)
-
     # --- Interruption severity ---
     interruption_severity: float = Field(
         default=0.0, ge=0.0, le=1.0,
         description="0 = no interruption, 1 = complete derailment"
     )
 
-    # --- Dynamic candidates ---
-    dynamic_candidates: List[CandidateArtifact] = Field(default_factory=list)
+    observations: List[str] = Field(default_factory=list)
+    questions: List[str] = Field(default_factory=list)
+    ambiguities: List[str] = Field(default_factory=list)
 
     # --- Internal candidates (now with provenance) ---
     internal_candidates: List[InternalCandidate] = Field(default_factory=list)
@@ -166,12 +167,11 @@ class MonologueOutput(BaseModel):
     )
 
     def has_substantive_changes(self) -> bool:
-        """Original method – unchanged."""
         return (
-            self.intent_confidence > 0.6 or
-            self.thematic_continuity < 0.8 or
-            abs(self.user_engagement_estimate - 0.5) > 0.2 or
-            self.interruption_severity > 0.3 or
-            bool(self.dynamic_candidates) or
-            self.curiosity_trigger is not None
+            bool(self.observations)
+            or bool(self.questions)
+            or bool(self.ambiguities)
+            or self.interruption_severity > 0.3
+            or bool(self.internal_candidates)
+            or self.curiosity_trigger is not None
         )

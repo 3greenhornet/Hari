@@ -26,3 +26,11 @@ AGENTS.md
 bundle.py
 hari_code_only.md
 hari_code_only.txt
+
+__pycache__/
+*.pyc
+.venv/
+.env
+logs/
+profiles/
+outputs/

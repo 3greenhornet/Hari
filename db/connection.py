@@ -6,6 +6,7 @@ from pgvector.asyncpg import register_vector
 
 _pool: Optional[asyncpg.Pool] = None
 
+
 async def init_db():
     global _pool
     dsn = os.getenv("DATABASE_URL")
@@ -14,30 +15,37 @@ async def init_db():
         return
     try:
         if _pool is None:
+            # The vector extension must exist BEFORE create_pool runs init=register_vector.
+            # register_vector requires the 'vector' type to already be present in the
+            # database, and asyncpg opens the first connection eagerly during pool
+            # creation. So we bootstrap the extension on a plain connection first.
+            bootstrap_conn = await asyncpg.connect(dsn)
+            try:
+                await bootstrap_conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            finally:
+                await bootstrap_conn.close()
+
             _pool = await asyncpg.create_pool(
-                dsn, 
-                min_size=1, 
+                dsn,
+                min_size=1,
                 max_size=5,
                 init=register_vector,
                 server_settings={"search_path": "public"}
             )
             print("✅ Database pool connected successfully")
-        
-        # Systemic Validation Check: Verify if the table is actually visible to this connection
+
+        # Verify the memories table is visible to this connection.
         async with _pool.acquire() as conn:
             table_exists = await conn.fetchval("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
+                    SELECT FROM information_schema.tables
+                    WHERE table_schema = 'public'
                     AND table_name = 'memories'
                 );
             """)
-            
+
             if not table_exists:
-                print("⚠️ Table 'memories' not found in this connection namespace! Initializing schema inline...")
-                # Ensure the vector extension is alive
-                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                # Explicit structural build
+                print("⚠️ Table 'memories' not found! Initializing schema inline...")
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS memories (
                         id TEXT PRIMARY KEY,
@@ -53,7 +61,7 @@ async def init_db():
                         created_at TIMESTAMP DEFAULT NOW()
                     );
                 """)
-                print("✅ Table 'memories' permanently stabilized inside active connection schema.")
+                print("✅ Table 'memories' stabilized.")
             else:
                 print("✅ Verified: 'memories' table found and active.")
 
@@ -61,11 +69,13 @@ async def init_db():
         print(f"❌ Database initialization failed structurally: {e}")
         _pool = None
 
+
 async def get_pool() -> Optional[asyncpg.Pool]:
     global _pool
     if _pool is None:
         await init_db()
     return _pool
+
 
 async def close_db():
     global _pool

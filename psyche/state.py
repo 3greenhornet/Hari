@@ -37,7 +37,7 @@ class StateTransition:
     old_value: float
     delta: float
     new_value: float
-    source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST"]
+    source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST", "REFLEXION"]
     reason: Optional[str] = None
 
 
@@ -49,7 +49,7 @@ class HariState:
     maintenance: float = 0.5
     completion: float = 0.5
     coherence: float = 0.5
-    rest: float = 0.2
+    rest: float = 0.5  # neutral ground state
     novelty: float = 0.5
 
     # Affective VAD (-1.0 to +1.0)
@@ -100,7 +100,7 @@ class HariState:
         new = (norm_new * scale) + low
         return max(low, min(high, new))
 
-    def update(self, deltas: Dict[str, float], source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST"] = "DRIFT", reason: Optional[str] = None) -> None:
+    def update(self, deltas: Dict[str, float], source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST", "REFLEXION"] = "DRIFT", reason: Optional[str] = None) -> None:
         for key, delta in deltas.items():
             if not hasattr(self, key):
                 continue

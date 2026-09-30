@@ -1,4 +1,13 @@
 """
+CRITICAL ARCHITECTURAL GUARD (2026-08-21):
+This module renders IdentityProjection into prompts. 
+It MUST remain a set of CONSTITUTIONAL CONSTRAINTS and COMMITMENTS.
+It MUST NOT become a behavioral script (e.g., "You are a curious being who loves...").
+Rationale: Emergent behavior comes from the Workspace competition, not from persona prose.
+Keep it crisp, factual, and principle-based.
+"""
+
+"""
 Identity Projection Renderer
 Converts IdentityProjection into consumer-specific formats.
 """

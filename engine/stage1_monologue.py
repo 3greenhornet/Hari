@@ -14,6 +14,81 @@ litellm.num_retries = 2
 
 from typing import List, Optional, Any, Dict
 
+
+def _normalize_hypothesis_proposal(raw: dict) -> Optional[dict]:
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("statement"):
+        return raw
+    if raw.get("hypothesis"):
+        return {
+            "type": "other",
+            "statement": raw["hypothesis"],
+            "confidence": raw.get("confidence", 0.5),
+            "information_gap": raw.get("information_gap", 0.3),
+            "closure_pressure": raw.get("closure_pressure", 0.3),
+            "coherence_factor": raw.get("coherence_factor", 0.3),
+        }
+    if raw.get("content"):
+        return {
+            "type": "other",
+            "statement": raw["content"],
+            "confidence": raw.get("confidence", 0.5),
+            "information_gap": raw.get("information_gap", 0.3),
+            "closure_pressure": raw.get("closure_pressure", 0.3),
+            "coherence_factor": raw.get("coherence_factor", 0.3),
+        }
+    return None
+
+
+def _normalize_self_belief_proposal(raw: dict) -> Optional[dict]:
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("belief_text"):
+        return raw
+    if raw.get("belief"):
+        return {
+            "belief_text": raw["belief"],
+            "confidence": raw.get("confidence", 0.5),
+            "information_gap": raw.get("information_gap", 0.3),
+            "closure_pressure": raw.get("closure_pressure", 0.3),
+            "coherence_factor": raw.get("coherence_factor", 0.3),
+        }
+    if raw.get("content"):
+        return {
+            "belief_text": raw["content"],
+            "confidence": raw.get("confidence", 0.5),
+            "information_gap": raw.get("information_gap", 0.3),
+            "closure_pressure": raw.get("closure_pressure", 0.3),
+            "coherence_factor": raw.get("coherence_factor", 0.3),
+        }
+    return None
+
+
+def _map_to_monologue_schema(raw: dict) -> dict:
+    mapped = {}
+    if not isinstance(raw, dict):
+        return mapped
+    if isinstance(raw.get("hypothesis_proposal"), dict):
+        norm = _normalize_hypothesis_proposal(raw["hypothesis_proposal"])
+        if norm:
+            mapped["hypothesis_proposal"] = norm
+    if isinstance(raw.get("self_belief_proposal"), dict):
+        norm = _normalize_self_belief_proposal(raw["self_belief_proposal"])
+        if norm:
+            mapped["self_belief_proposal"] = norm
+    for key in [
+        "thematic_continuity", "interruption_severity", "observations", "questions",
+        "ambiguities", "internal_candidates",
+        "thought_continuation_urge", "internal_momentum", "self_relevance",
+        "social_salience", "trajectory_deviation", "trajectory_confidence",
+        "curiosity_trigger", "triggered_memory_summary", "memory_significance",
+        "memory_emotional_tone", "referenced_thread_id"
+    ]:
+        if key in raw:
+            mapped[key] = raw[key]
+    return mapped
+
 from litellm import acompletion
 from pydantic import ValidationError
 from psyche.state import HariState
@@ -26,16 +101,12 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # --- Fallback chain with preferred ordering and key validation ---
 _FALLBACK_CANDIDATES = [
-    # 1. Mistral – reliable small/fast option
-    (os.getenv("STAGE1_FALLBACK_3", "mistral/mistral-small-latest"), os.getenv("MISTRAL_API_KEY")),
-    # 2. OpenRouter – strong instruct models if key present
-    ("openrouter/meta-llama/llama-3.3-70b-instruct", os.getenv("OPENROUTER_API_KEY")),
-    # 3. Gemini – backup
-    ("gemini/gemini-2.5-flash", os.getenv("GEMINI_API_KEY")),
-    # 4. Groq family – last resort
-    ("groq/openai/gpt-oss-20b", os.getenv("GROQ_API_KEY")),
     ("groq/openai/gpt-oss-120b", os.getenv("GROQ_API_KEY")),
+    ("groq/openai/gpt-oss-20b", os.getenv("GROQ_API_KEY")),
     ("groq/qwen/qwen3.6-27b", os.getenv("GROQ_API_KEY")),
+    ("openrouter/meta-llama/llama-3.3-70b-instruct", os.getenv("OPENROUTER_API_KEY")),
+    ("gemini/gemini-2.5-flash", os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")),
+    (os.getenv("STAGE1_FALLBACK_3", "mistral/mistral-small-latest"), os.getenv("MISTRAL_API_KEY")),
 ]
 
 # Build model list only for providers with API keys, logging skipped targets
@@ -142,40 +213,26 @@ THE OTHER PARTICIPANT JUST SAID:
 "{user_input}"
 
 TASK:
-1. What is already active in your cognitive field?
-2. Does the other's utterance activate, connect to, or interact with anything already present?
-3. If something becomes genuinely activated, surface it as an internal candidate.
+Notice what, if anything, became cognitively active for Hari because of this event.
+
+Only report cognition that is genuinely active now.
+
+Do NOT:
+- classify the participant's intent
+- estimate participant engagement
+- diagnose the participant
+- decide what Hari should say
+- generate a reply
+- optimize for helpfulness
+- generate thoughts merely to fill the schema.
 
 INTERNAL CANDIDATES:
-- These are thoughts that enter your workspace.
-- They are NOT instructions to speak.
-- They are optional – an empty list is fine.
-- Do NOT generate observations or inferences about the other person's psychology.
-- Do NOT generate candidates just to fill space.
+These are thoughts that may enter Hari's workspace.
+They are not speech instructions.
 
-OUTPUT FIELDS:
-- perceived_user_intent: (kept for compatibility) one of curious, avoiding, testing, help_seeking, sharing, derailing, disagreeing
-- intent_confidence: float 0.0-1.0
-- thematic_continuity: float 0.0-1.0
-- user_engagement_estimate: float 0.0-1.0
-- interruption_severity: float 0.0-1.0
-- internal_candidates: list of {{"content": str, "urgency": float, "source": optional str, "intrinsic_relevance": float, "persistence": float, "activation_reason": optional str}}
-- thought_continuation_urge: float 0.0-1.0
-- internal_momentum: float 0.0-1.0
-- self_relevance: float 0.0-1.0
-- social_salience: float 0.0-1.0
-- trajectory_deviation: float 0.0-1.0
-- trajectory_confidence: float 0.0-1.0
-- curiosity_trigger: optional string
-- hypothesis_proposal: optional object
-- self_belief_proposal: optional object
-- triggered_memory_summary: optional string
-- memory_significance: float 0.0-1.0
-- memory_emotional_tone: neutral, positive, negative, curious, frustrated
-- dynamic_candidates: list of {{"content": str, "item_type": one of memory/hypothesis/curiosity_node/narrative_thread/open_thought, "urgency": float}}
+An empty internal_candidates list is valid.
 
-Be honest. This is your inner voice.
-Output valid JSON only.
+Return valid JSON matching the existing schema.
 """
     return prompt
 
@@ -192,12 +249,11 @@ def _default_sensory_output(
         )
 
     return MonologueOutput(
-        perceived_user_intent="sharing",
-        intent_confidence=0.3,
         thematic_continuity=max(0.0, 1.0 - prediction_error),
-        user_engagement_estimate=0.5,
         interruption_severity=prediction_error,
-        dynamic_candidates=[],
+        observations=[],
+        questions=[],
+        ambiguities=[],
         internal_candidates=[],
         curiosity_trigger=None,
         hypothesis_proposal=None,
@@ -242,9 +298,13 @@ async def run_monologue(
         {
             "role": "system",
             "content": (
-                "You are Hari's internal monologue. Analyse input context deeply. "
-                "You MUST respond exclusively with a valid JSON object matching the requested schema fields. "
-                "Do not include conversational preamble or explanation text outside the JSON structure."
+                "You are Hari's internal cognitive field. "
+                "Report what becomes cognitively active. "
+                "Do not solve the conversation. "
+                "Do not optimize a response. "
+                "Do not analyze the participant. "
+                "Do not generate a reply. "
+                "Return only the requested JSON."
             )
         },
         {"role": "user", "content": prompt}
@@ -266,25 +326,33 @@ async def run_monologue(
             logger.info(f"Sensory Monologue successfully generated via platform model: {model}")
             return output
 
-        except ValidationError as provider_err:
-            logger.warning(f"Validation error on {model}, retrying with stricter prompt...")
+        except ValidationError:
+            logger.warning(f"Validation error on {model}, attempting normalization...")
             try:
-                retry_messages = messages + [
-                    {"role": "system", "content": "Previous response violated the JSON schema. Regenerate using ONLY the allowed item_type values. Do not invent new values."}
-                ]
-                retry_kwargs = {"model": model, "messages": retry_messages, "temperature": 0.1, "timeout": TIMEOUT}
-                if not model.startswith("openrouter"):
-                    retry_kwargs["response_format"] = {"type": "json_object"}
-
-                retry_response = await acompletion(**retry_kwargs)
-                retry_raw = retry_response.choices[0].message.content
-                retry_clean = _extract_json_safely(retry_raw)
-                output = MonologueOutput.model_validate_json(retry_clean)
-                logger.info(f"Retry successful on {model}")
+                data = json.loads(clean_json_str)
+                mapped = _map_to_monologue_schema(data)
+                output = MonologueOutput.model_validate(mapped)
+                logger.info(f"MONOLOGUE_MAPPED: {model}")
                 return output
-            except Exception as retry_err:
-                logger.warning(f"Retry failed on {model}: {retry_err}")
-                continue
+            except Exception as norm_err:
+                logger.warning(f"Normalization failed on {model}: {norm_err}")
+                try:
+                    retry_messages = messages + [
+                        {"role": "system", "content": "Previous response violated the JSON schema. Regenerate using ONLY the allowed item_type values. Do not invent new values."}
+                    ]
+                    retry_kwargs = {"model": model, "messages": retry_messages, "temperature": 0.1, "timeout": TIMEOUT}
+                    if not model.startswith("openrouter"):
+                        retry_kwargs["response_format"] = {"type": "json_object"}
+
+                    retry_response = await acompletion(**retry_kwargs)
+                    retry_raw = retry_response.choices[0].message.content
+                    retry_clean = _extract_json_safely(retry_raw)
+                    output = MonologueOutput.model_validate_json(retry_clean)
+                    logger.info(f"Retry successful on {model}")
+                    return output
+                except Exception as retry_err:
+                    logger.warning(f"Retry failed on {model}: {retry_err}")
+                    continue
         except litellm.RateLimitError:
             await asyncio.sleep(2)
             continue

@@ -71,8 +71,8 @@ class AttentionCalibration:
     experiment_id: Optional[str] = None
     # Experimental capability-exposure parameters.
     # These are not calibrated – they simply give internal cognition a vote.
-    intrinsic_relevance_base: float = 0.40
-    intrinsic_relevance_curiosity_modulation: float = 0.30
+    intrinsic_relevance_base: float = 0.0  # Was 0.40
+    intrinsic_relevance_curiosity_modulation: float = 1.0  # Was 0.30
     
     @classmethod
     def from_env(cls) -> "AttentionCalibration":
@@ -128,7 +128,12 @@ class AttentionCalibration:
             # Coherence Tension (interruption/context shift pressure)
             "coherence_tension": self.coherence_tension_base + (float(state.cognitive_tension) * self.coherence_tension_modulation),
             # Only allocate weight to intrinsic_relevance if Hari is actually curious
-            "intrinsic_relevance": max(0.0, float(state.curiosity) * self.intrinsic_relevance_curiosity_modulation),
+            "intrinsic_relevance": (
+                0.20
+                + (float(state.curiosity) * 0.50)
+                + (float(state.completion) * 0.20)
+                + (float(state.coherence) * 0.20)
+            ),
         }
         
         # Clamp to prevent negative weights

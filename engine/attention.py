@@ -128,8 +128,21 @@ async def _compute_pressure_field(
             logger.warning(f"Relevance pressure failed: {e}")
     pressures["relevance"] = relevance
 
-    # 2. Novelty Pressure: driven by prediction error
-    novelty = min(1.0, max(0.0, prediction_error))
+    # 2. Novelty (candidate-specific surprise)
+    candidate_embedding = candidate.get("embedding")
+    if user_embedding is not None and candidate_embedding is not None:
+        try:
+            cand_emb = np.array(candidate_embedding, dtype=np.float32)
+            user_norm = user_embedding / (np.linalg.norm(user_embedding) + 1e-8)
+            cand_norm = cand_emb / (np.linalg.norm(cand_emb) + 1e-8)
+            similarity = np.dot(user_norm, cand_norm)
+            similarity = max(0.0, min(1.0, similarity))
+            candidate_surprise = prediction_error * (1.0 - similarity)
+        except Exception:
+            candidate_surprise = prediction_error * 0.25
+    else:
+        candidate_surprise = prediction_error * 0.25
+    novelty = max(0.0, min(1.0, candidate_surprise))
     pressures["novelty"] = novelty
 
     # 3. Curiosity Pressure (Ecology Signals Contract: no item-type logic)
@@ -171,6 +184,14 @@ async def _compute_pressure_field(
     # Intrinsic relevance (from internal candidates)
     intrinsic_relevance = float(candidate.get("intrinsic_relevance", 0.0))
     pressures["intrinsic_relevance"] = min(1.0, max(0.0, intrinsic_relevance))
+
+    content_text = str(candidate.get("content", ""))
+    word_count = len(content_text.split())
+    if word_count > 50 and float(state.care) < 0.4:
+        lecturer_penalty = (word_count / 50.0) * 0.2
+        pressures["lecturer_penalty"] = -lecturer_penalty
+    else:
+        pressures["lecturer_penalty"] = 0.0
 
     return pressures
 
@@ -272,25 +293,16 @@ def _softmax(scores: List[float], temperature: float) -> List[float]:
 
 
 def broadcast_feedback(elected: List[WorkspaceItem], state: HariState) -> None:
-    """Broadcast workspace composition back into state drives using source-dependent ratios.
-
-    This makes the feedback sensitive to the types and provenance of elected items.
-    """
-    if not elected:
-        return
-
+    if not elected: return
     n = len(elected)
-
     curiosity_ratio = sum(1 for item in elected if item.item_type == "curiosity_node") / n
     narrative_ratio = sum(1 for item in elected if item.item_type == "narrative_thread") / n
     internal_ratio = sum(1 for item in elected if item.payload.get("source") == "internal_cognition") / n
-    memory_ratio = sum(1 for item in elected if item.item_type == "memory") / n
-
     state.update({
-        "curiosity": curiosity_ratio * 0.40,
-        "completion": narrative_ratio * 0.30,
-        "coherence": (narrative_ratio * 0.25 + internal_ratio * 0.20),
-        "momentum": (internal_ratio * 0.35 + curiosity_ratio * 0.20),
+        "curiosity": curiosity_ratio * 0.80,
+        "completion": narrative_ratio * 0.80,
+        "coherence": (narrative_ratio * 0.80 + internal_ratio * 0.80),
+        "momentum": (internal_ratio * 0.80 + curiosity_ratio * 0.80),
     }, source="BROADCAST", reason="workspace_feedback")
 
 
@@ -438,8 +450,10 @@ async def load_workspace(
     # 3. Add previous workspace items with decayed activation (attentional inertia)
     if previous_workspace_items:
         for old_item in previous_workspace_items:
-            # Decay activation by 0.85 per turn (exponential)
-            old_item.metrics.activation *= 0.85
+            base_decay = 1.0 - (float(state.rest) * 0.4)
+            tension_retention = float(state.cognitive_tension) * 0.5
+            decay_multiplier = min(1.0, base_decay + tension_retention)
+            old_item.metrics.activation *= decay_multiplier
             if old_item.metrics.activation < 0.05:
                 continue
             # Convert back to candidate dict and preserve internal metadata for inertia
@@ -511,14 +525,13 @@ async def load_workspace(
         # Memory fatigue and explanatory power
         usage_count = payload.get("usage_count", 0)
         explanatory_power = payload.get("explanatory_power", 0.5)
-        surprise_contribution = prediction_error * explanatory_power
         fatigue_penalty = min(0.3, usage_count * 0.02)
         
         # Store fatigue_penalty in pressures so telemetry can see it
         pressures["fatigue_penalty"] = fatigue_penalty
         
-        # Final salience
-        total_salience = total_salience + surprise_contribution - fatigue_penalty
+        # Remove the global surprise bonus – only candidate-specific novelty remains.
+        total_salience = total_salience - fatigue_penalty
         total_salience = max(0.0, total_salience)
         
         # Boost for open_thought
@@ -775,29 +788,6 @@ async def load_workspace_secured(
                         )
                         mem.computed_score = 0.5
                         candidates.append(mem)
-
-    # Layer 3: Inertia – inject previous workspace items
-    if len(candidates) < 3 and previous_workspace_items:
-        logger.warning(f"Turn {current_turn}: Injecting previous workspace items for inertia.")
-        for old_item in previous_workspace_items:
-            if not any(c.id == old_item.id for c in candidates):
-                mem = MemoryEvent(
-                    id=old_item.id,
-                    session_id=session_id,
-                    turn_number=current_turn - 1,
-                    role="assistant",
-                    content=old_item.content,
-                    event_type="None",
-                    thematic_tags=[],
-                    significance=0.4,
-                    meaning_summary=old_item.content[:100],
-                    created_at=datetime.now(timezone.utc),
-                    usage_count=0,
-                    last_retrieved_turn=current_turn - 1,
-                    explanatory_power=0.3
-                )
-                mem.computed_score = 0.4
-                candidates.append(mem)
 
     # Apply diversity penalty
     diversified = apply_workspace_diversity_penalty(candidates, target_count=15)

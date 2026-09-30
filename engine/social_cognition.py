@@ -47,7 +47,7 @@ async def interpret_turn_and_update_state(
     shift_magnitude = (
         params.thematic_continuity_weight * (1.0 - monologue_output.thematic_continuity) +
         params.trajectory_deviation_weight * trajectory_deviation +
-        params.engagement_weight * (1.0 - monologue_output.user_engagement_estimate) +
+        params.engagement_weight * (1.0 - 0.5) +
         params.history_weight * history_shift
     )
     shift_magnitude = max(0.0, min(1.0, shift_magnitude))
@@ -55,26 +55,26 @@ async def interpret_turn_and_update_state(
     
     # 4. Sincerity Estimate
     interaction.sincerity_estimate = (
-        monologue_output.intent_confidence * 0.5 +
-        monologue_output.user_engagement_estimate * 0.3 +
+        0.5 * 0.5 +
+        0.5 * 0.3 +
         (1.0 - trajectory_deviation) * 0.2
     )
     
     # 5. Update Cognitive State (Asymptotic, Continuous)
-    effective_shift = shift_magnitude * monologue_output.intent_confidence
+    effective_shift = shift_magnitude * 0.5
     
     # Base state updates
     state_updates = {
         "uncertainty": effective_shift * params.uncertainty_coeff,
-        "engagement": (monologue_output.user_engagement_estimate * params.engagement_coeff) - (effective_shift * 0.02),
-        "social_ambiguity": effective_shift * (1.0 - monologue_output.intent_confidence) * params.social_ambiguity_coeff
+        "engagement": (0.5 * params.engagement_coeff) - (effective_shift * 0.02),
+        "social_ambiguity": effective_shift * (1.0 - 0.5) * params.social_ambiguity_coeff
     }
 
     # Map memory emotional tone to VAD adjustments
     TONE_VALENCE = {"positive": 0.08, "frustrated": -0.1, "curious": 0.02, "calm": 0.0, "neutral": 0.0}
     TONE_AROUSAL = {"frustrated": 0.12, "curious": 0.08, "positive": 0.02, "calm": -0.05, "neutral": 0.0}
     tone = getattr(monologue_output, "memory_emotional_tone", "neutral")
-    tone_confidence = monologue_output.intent_confidence
+    tone_confidence = 0.5
     state_updates["valence"] = state_updates.get("valence", 0.0) + TONE_VALENCE.get(tone, 0.0) * tone_confidence
     state_updates["arousal"] = state_updates.get("arousal", 0.0) + TONE_AROUSAL.get(tone, 0.0) * tone_confidence
     
@@ -86,7 +86,7 @@ async def interpret_turn_and_update_state(
         monologue_output.interruption_severity * 0.35
         + monologue_output.trajectory_deviation * 0.25
         + (1.0 - monologue_output.thematic_continuity) * 0.20
-        + monologue_output.intent_confidence * 0.20
+        + 0.5 * 0.20
     )
     social_effect = max(0.0, min(1.0, social_effect))
 
@@ -103,7 +103,7 @@ async def interpret_turn_and_update_state(
         rel = relational_manager.get_model()
         
         familiarity_delta = (
-            monologue_output.user_engagement_estimate * params.familiarity_growth_coeff -
+            0.5 * params.familiarity_growth_coeff -
             shift_magnitude * params.familiarity_shift_decay_coeff
         )
         rel.update_familiarity(familiarity_delta)
@@ -139,10 +139,7 @@ async def interpret_turn(
     logger.warning("interpret_turn() is deprecated; use interpret_turn_and_update_state() instead.")
     from models.monologue_output import MonologueOutput
     monologue_output = MonologueOutput(
-        perceived_user_intent="sharing",
-        intent_confidence=0.5,
         thematic_continuity=0.8,
-        user_engagement_estimate=0.5,
         interruption_severity=0.0,
         memory_significance=0.5,
         memory_emotional_tone="neutral"

@@ -6,13 +6,14 @@ from typing import List, Optional, Dict
 from datetime import datetime
 import numpy as np
 from google import genai
+from google.genai import types
 from models.memory_event import MemoryEvent
 import math
 
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 _genai_client = None
 
 def get_genai_client():
@@ -25,7 +26,8 @@ async def embed(text: str) -> List[float]:
     client = get_genai_client()
     response = await client.aio.models.embed_content(
         model=EMBEDDING_MODEL,
-        contents=text
+        contents=text,
+        config=types.EmbedContentConfig(output_dimensionality=768),
     )
     return response.embeddings[0].values
 
@@ -34,20 +36,21 @@ async def store_memory(event: MemoryEvent) -> None:
     pool = await get_pool()
     if pool is None:
         return
-    # Compute embedding from content (not from event.embedding which may be None)
     embedding = await embed(event.content)
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO memories (id, session_id, turn_number, role, content, event_type,
                                 thematic_tags, significance, meaning_summary, embedding, created_at,
-                                usage_count, last_retrieved_turn, explanatory_power)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                                usage_count, last_retrieved_turn, explanatory_power,
+                                valence, arousal)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         """, event.id, event.session_id, event.turn_number,
             event.role, event.content, event.event_type,
             event.thematic_tags, event.significance,
             event.meaning_summary, embedding,
             event.created_at,
-            event.usage_count, event.last_retrieved_turn, event.explanatory_power)
+            event.usage_count, event.last_retrieved_turn, event.explanatory_power,
+            event.valence, event.arousal)
 
 async def retrieve_similar(
     query: str,
@@ -174,6 +177,54 @@ async def increment_memory_usage(memory_ids: List[str], current_turn: int) -> No
             WHERE id = ANY($1::text[])
         """, memory_ids, current_turn)
 
+
+def compute_actr_base_level_activation(
+    usage_count: int,
+    turns_since_last_retrieval: int,
+    decay_rate: float = 0.5
+) -> float:
+    if usage_count <= 0:
+        return -10.0
+    t = max(1, turns_since_last_retrieval)
+    base_activation = math.log(usage_count / (1.0 - decay_rate)) - (decay_rate * math.log(t))
+    return base_activation
+
+
+def compute_full_actr_activation(
+    memory_item,
+    current_turn: int,
+    query_embedding: list,
+    decay_d: float = 0.5,
+    mismatch_penalty_P: float = 1.0,
+    noise_s: float = 0.25
+) -> float:
+    time_since_last = max(current_turn - memory_item.turn_number, 0.001)
+    B_i = math.log((memory_item.usage_count + 1) / (time_since_last ** decay_d))
+
+    mem_vec = memory_item.embedding
+    if mem_vec is not None and query_embedding is not None:
+        m_vec = np.array(mem_vec)
+        q_vec = np.array(query_embedding)
+        sim = np.dot(m_vec, q_vec) / (np.linalg.norm(m_vec) * np.linalg.norm(q_vec) + 1e-9)
+        partial = mismatch_penalty_P * (float(sim) - 1.0)
+    else:
+        partial = 0.0
+
+    noise = np.random.gumbel(0, noise_s) if noise_s > 0 else 0.0
+    return B_i + partial + noise
+
+
+def compute_somatic_bonus(
+    current_valence: float,
+    current_arousal: float,
+    memory_valence: float,
+    memory_arousal: float
+) -> float:
+    distance_sq = (current_valence - memory_valence)**2 + (current_arousal - memory_arousal)**2
+    concordance = math.exp(-distance_sq / (2 * 0.5**2))
+    return 0.8 * math.log(concordance + 1e-5)
+
+
 async def retrieve_candidates_hybrid(
     query: str,
     session_id: str,
@@ -202,6 +253,7 @@ async def retrieve_candidates_hybrid(
             SELECT id, session_id, turn_number, role, content, event_type,
                    thematic_tags, significance, meaning_summary,
                    usage_count, last_retrieved_turn, explanatory_power, created_at,
+                   valence, arousal,
                    (1 - (embedding <=> $1)) AS vector_similarity,
                    ts_rank_cd(text_search_vector, plainto_tsquery('english', $2)) AS keyword_score
             FROM memories
@@ -257,7 +309,17 @@ async def retrieve_candidates_hybrid(
         if state_drives.get("completion", 0.0) > 0.7 and mem.event_type in ("open_thread", "tension"):
             drive_boost += 0.20
 
-        mem.computed_score = base_score + drive_boost
+        # --- ACT‑R and Somatic Bonus ---
+        actr_score = compute_full_actr_activation(
+            mem, current_turn, query_embedding, decay_d=0.5, noise_s=0.25
+        )
+        somatic_bonus = compute_somatic_bonus(
+            state_drives.get("valence", 0.0),
+            state_drives.get("arousal", 0.0),
+            row.get("valence", 0.0),
+            row.get("arousal", 0.0)
+        )
+        mem.computed_score = base_score + (actr_score * 0.1) + somatic_bonus
         candidates.append(mem)
 
     candidates.sort(key=lambda x: x.computed_score, reverse=True)

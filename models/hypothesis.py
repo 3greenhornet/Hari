@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Literal
 
 class Hypothesis(BaseModel):
-    type: Literal["user", "self", "world"] = Field(
+    type: Literal["other", "self", "world"] = Field(
         ..., description="Category of the hypothesis"
     )
     statement: str
