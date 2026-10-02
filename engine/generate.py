@@ -87,8 +87,13 @@ class TurnPipeline:
             similarity_threshold=cfg.REFRACTORY_SIMILARITY,
             max_penalty=cfg.REFRACTORY_MAX_PENALTY,
         )
+        self._cycle_lock = asyncio.Lock()
 
-    async def execute(self, user_input: str, turn_count: int, trace_id: Optional[str] = None) -> Dict[str, Any]:
+    async def execute(self, user_input: str, turn_count: int, trace_id: Optional[str] = None, seed="event") -> Dict[str, Any]:
+        async with self._cycle_lock:
+            return await self._execute_inner(user_input, turn_count, trace_id, seed)
+
+    async def _execute_inner(self, user_input: str, turn_count: int, trace_id: Optional[str] = None, seed="event") -> Dict[str, Any]:
         # 1. Prediction Error
         surprise = await compute_prediction_error(self._last_assistant_response, user_input)
         

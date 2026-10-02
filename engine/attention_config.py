@@ -123,8 +123,6 @@ class AttentionCalibration:
             "shared_significance": self.shared_significance_base + (float(state.care) * self.shared_significance_modulation),
             # Coherence Tension (interruption/context shift pressure)
             "coherence_tension": self.coherence_tension_base + (float(state.cognitive_tension) * self.coherence_tension_modulation),
-            "persistence": self.persistence_base,
-            "internal_activation": self.internal_activation_base,
             "intrinsic_relevance": 0.20 + (float(state.curiosity) * 0.50) + (float(state.completion) * 0.20) + (float(state.coherence) * 0.20),
         }
         if os.getenv("ENABLE_AUTHORITY_CAUSAL", "false").lower() == "true":
