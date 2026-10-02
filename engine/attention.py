@@ -1,4 +1,4 @@
-﻿"""
+"""
 engine/attention.py — Cognitive Workspace & Attention System (Pressure‑Field Architecture)
 
 Implements a Global Workspace Theory (GWT) selection–broadcast cycle using a
