@@ -140,104 +140,97 @@ class WorkspaceItem:
 async def _compute_pressure_field(
     candidate: Dict[str, Any],
     state: HariState,
-    external_event_embedding: Optional[np.ndarray],
+    event_embedding: Optional[np.ndarray],
     active_context_embedding: Optional[np.ndarray],
     prediction_error: float,
 ) -> Dict[str, float]:
-    """
-    Returns a vector of pressure values for a single candidate.
-    """
-    pressures = {}
+    pressures: Dict[str, float] = {}
 
-    # 1. Event affinity: cosine similarity with the incoming event.
-    relevance = 0.5   # default neutral
-    candidate_embedding = candidate.get("embedding")
-    if external_event_embedding is not None and candidate_embedding is not None:
-        try:
-            candidate_emb = np.array(candidate_embedding, dtype=np.float32)
-            event_norm = external_event_embedding / (np.linalg.norm(external_event_embedding) + 1e-8)
-            cand_norm = candidate_emb / (np.linalg.norm(candidate_emb) + 1e-8)
-            cos_sim = np.dot(event_norm, cand_norm)
-            relevance = (cos_sim + 1) / 2
-        except Exception as e:
-            logger.warning(f"Event affinity pressure failed: {e}")
-    pressures["event_affinity"] = relevance
+    if event_embedding is not None:
+        event_affinity = 0.5
+        candidate_embedding = candidate.get("embedding")
+        if candidate_embedding is not None:
+            try:
+                candidate_emb = np.array(candidate_embedding, dtype=np.float32)
+                event_norm = event_embedding / (np.linalg.norm(event_embedding) + 1e-8)
+                cand_norm = candidate_emb / (np.linalg.norm(candidate_emb) + 1e-8)
+                event_affinity = (float(np.dot(event_norm, cand_norm)) + 1) / 2
+            except Exception:
+                pass
+        pressures["event_affinity"] = event_affinity
 
+        novelty = 0.0
+        if candidate_embedding is not None:
+            try:
+                cand_emb = np.array(candidate_embedding, dtype=np.float32)
+                event_norm = event_embedding / (np.linalg.norm(event_embedding) + 1e-8)
+                cand_norm = cand_emb / (np.linalg.norm(cand_emb) + 1e-8)
+                similarity = float(np.dot(event_norm, cand_norm))
+                similarity = max(0.0, min(1.0, similarity))
+                novelty = prediction_error * (1.0 - similarity)
+            except Exception:
+                novelty = prediction_error * 0.25
+        pressures["novelty"] = max(0.0, min(1.0, novelty))
+
+    # endogenous_affinity — always present
     endogenous_affinity = 0.0
-    if active_context_embedding is not None and candidate_embedding is not None:
+    if active_context_embedding is not None and candidate.get("embedding") is not None:
         try:
-            candidate_emb = np.array(candidate_embedding, dtype=np.float32)
+            candidate_emb = np.array(candidate["embedding"], dtype=np.float32)
             context_norm = active_context_embedding / (np.linalg.norm(active_context_embedding) + 1e-8)
             cand_norm = candidate_emb / (np.linalg.norm(candidate_emb) + 1e-8)
             endogenous_affinity = (float(np.dot(context_norm, cand_norm)) + 1) / 2
-        except Exception as e:
-            logger.debug(f"Endogenous affinity pressure failed: {e}")
-    pressures["endogenous_affinity"] = float(endogenous_affinity)
-
-    # 2. Novelty (candidate-specific surprise)
-    candidate_embedding = candidate.get("embedding")
-    if external_event_embedding is not None and candidate_embedding is not None:
-        try:
-            cand_emb = np.array(candidate_embedding, dtype=np.float32)
-            user_norm = external_event_embedding / (np.linalg.norm(external_event_embedding) + 1e-8)
-            cand_norm = cand_emb / (np.linalg.norm(cand_emb) + 1e-8)
-            similarity = np.dot(user_norm, cand_norm)
-            similarity = max(0.0, min(1.0, similarity))
-            candidate_surprise = prediction_error * (1.0 - similarity)
         except Exception:
-            candidate_surprise = prediction_error * 0.25
-    else:
-        candidate_surprise = prediction_error * 0.25
-    novelty = max(0.0, min(1.0, candidate_surprise))
-    pressures["novelty"] = novelty
+            pass
+    pressures["endogenous_affinity"] = endogenous_affinity
 
-    # 3. Curiosity Pressure (Ecology Signals Contract: no item-type logic)
+    # curiosity
     curiosity_boost = float(candidate.get("information_gap", 0.0))
-    curiosity_pressure = min(1.0, state.curiosity * (1.0 + curiosity_boost))
-    pressures["curiosity"] = curiosity_pressure
+    pressures["curiosity"] = min(1.0, state.curiosity * (1.0 + curiosity_boost))
 
-    # 4. Completion Pressure (Ecology Signals Contract: no item-type logic)
+    # completion
     completion_urgency = float(candidate.get("closure_pressure", 0.0))
-    completion_pressure = min(1.0, state.completion * (1.0 + completion_urgency))
-    pressures["completion"] = completion_pressure
+    pressures["completion"] = min(1.0, state.completion * (1.0 + completion_urgency))
 
-    # 5. Exploratory Potential (Ticket 011)
+    # exploratory potential
     exploration_progress = float(candidate.get("exploration_progress", 0.0))
-    exploratory_potential = (novelty * 0.5) + (curiosity_pressure * 0.5)
+    novelty_for_exploratory = pressures.get("novelty", 0.0)
+    exploratory_potential = (novelty_for_exploratory * 0.5) + (pressures["curiosity"] * 0.5)
     if candidate.get("item_type") == "curiosity_node":
         exploratory_potential *= (1.0 - exploration_progress)
     pressures["exploratory_potential"] = min(1.0, exploratory_potential)
 
-    # 6. Shared Significance (Ticket 012)
-    # Uses the shared_significance module (or you can inline as fallback)
+    # shared significance
     try:
         from engine.shared_significance import compute_shared_significance
-        shared_significance = compute_shared_significance(candidate, state)
+        pressures["shared_significance"] = min(1.0, compute_shared_significance(candidate, state))
     except ImportError:
-        # Fallback inline computation if module missing
-        item_significance = float(candidate.get("significance", 0.5))
-        shared_significance = (item_significance * 0.5) + (float(state.care) * 0.5)
-    pressures["shared_significance"] = min(1.0, shared_significance)
+        item_sig = float(candidate.get("significance", 0.5))
+        pressures["shared_significance"] = min(1.0, item_sig * 0.5 + float(state.care) * 0.5)
 
-    # === Coherence Tension Pressure ===
-    # Naturally boosts thoughts/hypotheses that resolve conversational tension.
+    # coherence tension
     if candidate.get("item_type") in ("open_thought", "hypothesis"):
-        coherence_tension = float(candidate.get("urgency", 0.0))
-        pressures["coherence_tension"] = min(1.0, coherence_tension)
+        pressures["coherence_tension"] = min(1.0, float(candidate.get("urgency", 0.0)))
     else:
         pressures["coherence_tension"] = 0.0
 
-    # Intrinsic relevance (from internal candidates)
+    # intrinsic relevance / persistence / internal activation
     intrinsic_relevance = float(candidate.get("intrinsic_relevance", 0.0))
-    pressures["intrinsic_relevance"] = min(1.0, max(0.0, intrinsic_relevance))
+    persistence = float(candidate.get("persistence", 0.0))
+    internal_activation = float(candidate.get("internal_activation", 0.0))
+    authority = _authority_weight(candidate)
 
-    pressures["persistence"] = max(
-        0.0, min(1.0, float(candidate.get("persistence", 0.0)))
+    pressures["intrinsic_relevance"] = min(1.0, max(0.0, intrinsic_relevance))
+    pressures["persistence"] = min(1.0, max(0.0, persistence))
+    pressures["internal_activation"] = min(1.0, max(0.0, internal_activation))
+    pressures["authority"] = authority
+
+    # internal_standing as a small amplifier, not a compound of the above
+    internal_standing = (
+        max(intrinsic_relevance, persistence, internal_activation)
+        * authority
     )
-    pressures["internal_activation"] = max(
-        0.0, min(1.0, float(candidate.get("internal_activation", 0.0)))
-    )
-    pressures["authority"] = _authority_weight(candidate)
+    pressures["internal_standing"] = min(1.0, max(0.0, internal_standing))
 
     return pressures
 
