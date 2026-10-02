@@ -1,4 +1,4 @@
-﻿# hari/engine/__init__.py
+# hari/engine/__init__.py
 """
 Engine package for Hari cognitive architecture.
 External code should import TurnPipeline from .generate directly.

@@ -1,4 +1,4 @@
-﻿"""
+"""
 engine/attention.py — Cognitive Workspace & Attention System (Pressure‑Field Architecture)
 
 Implements a Global Workspace Theory (GWT) selection–broadcast cycle using a
@@ -871,9 +871,7 @@ async def load_workspace_secured(
     # Apply diversity penalty
     diversified = apply_workspace_diversity_penalty(candidates, target_count=15)
     return diversified
-3. Multi-round settling
-3.1 engine/attention.py — add at bottom of file
-python
+
 async def settle_workspace(
     *,
     memories: List[MemoryEvent],
