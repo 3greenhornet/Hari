@@ -20,8 +20,10 @@ Attentional inertia: winning items persist across turns with exponential decay.
 """
 
 import asyncio
+import json
 import logging
 import math
+import os
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Literal
@@ -42,6 +44,21 @@ from models.narrative import NarrativeThread
 
 logger = logging.getLogger(__name__)
 
+
+def _authority_weight(candidate: Dict[str, Any]) -> float:
+    """Compute a structural provenance weight for a workspace candidate."""
+    origin = str(candidate.get("origin") or "")
+    source = str(candidate.get("source") or "")
+    if origin.startswith("volition") or origin in ("internal_cognition", "curiosity_spreading"):
+        return 1.0
+    if source in ("volition", "volition_persistent", "internal_cognition", "curiosity_spreading"):
+        return 1.0
+    if origin in ("narrative", "self_belief", "perspective"):
+        return 0.85
+    if origin in ("memory", "hypothesis"):
+        return 0.6
+    return 0.4
+
 # -----------------------------------------------------------------------------
 # Data Models – Container Pattern + Inertia Metrics
 # -----------------------------------------------------------------------------
@@ -60,7 +77,10 @@ class WorkspaceItem:
     def __init__(
         self,
         id: str,
-        item_type: Literal["memory", "hypothesis", "curiosity_node", "narrative_thread", "open_thought", "minimal"],
+        item_type: Literal[
+            "memory", "hypothesis", "curiosity_node", "narrative_thread",
+            "open_thought", "minimal", "incoming_event",
+        ],
         source: str,                   # where it came from (engine.memory, monologue, etc.)
         payload: Dict[str, Any],       # the actual content, unchanged
         attention_weight: float = 0.0,
@@ -106,7 +126,8 @@ class WorkspaceItem:
 async def _compute_pressure_field(
     candidate: Dict[str, Any],
     state: HariState,
-    user_embedding: Optional[np.ndarray],
+    event_embedding: Optional[np.ndarray],
+    active_context_embedding: Optional[np.ndarray],
     prediction_error: float,
 ) -> Dict[str, float]:
     """
@@ -114,26 +135,37 @@ async def _compute_pressure_field(
     """
     pressures = {}
 
-    # 1. Relevance Pressure: cosine similarity with user input
+    # 1. Event affinity: cosine similarity with the incoming event.
     relevance = 0.5   # default neutral
     candidate_embedding = candidate.get("embedding")
-    if user_embedding is not None and candidate_embedding is not None:
+    if event_embedding is not None and candidate_embedding is not None:
         try:
             candidate_emb = np.array(candidate_embedding, dtype=np.float32)
-            user_norm = user_embedding / (np.linalg.norm(user_embedding) + 1e-8)
+            event_norm = event_embedding / (np.linalg.norm(event_embedding) + 1e-8)
             cand_norm = candidate_emb / (np.linalg.norm(candidate_emb) + 1e-8)
-            cos_sim = np.dot(user_norm, cand_norm)
+            cos_sim = np.dot(event_norm, cand_norm)
             relevance = (cos_sim + 1) / 2
         except Exception as e:
-            logger.warning(f"Relevance pressure failed: {e}")
-    pressures["relevance"] = relevance
+            logger.warning(f"Event affinity pressure failed: {e}")
+    pressures["event_affinity"] = relevance
+
+    endogenous_affinity = 0.0
+    if active_context_embedding is not None and candidate_embedding is not None:
+        try:
+            candidate_emb = np.array(candidate_embedding, dtype=np.float32)
+            context_norm = active_context_embedding / (np.linalg.norm(active_context_embedding) + 1e-8)
+            cand_norm = candidate_emb / (np.linalg.norm(candidate_emb) + 1e-8)
+            endogenous_affinity = (float(np.dot(context_norm, cand_norm)) + 1) / 2
+        except Exception as e:
+            logger.debug(f"Endogenous affinity pressure failed: {e}")
+    pressures["endogenous_affinity"] = float(endogenous_affinity)
 
     # 2. Novelty (candidate-specific surprise)
     candidate_embedding = candidate.get("embedding")
-    if user_embedding is not None and candidate_embedding is not None:
+    if event_embedding is not None and candidate_embedding is not None:
         try:
             cand_emb = np.array(candidate_embedding, dtype=np.float32)
-            user_norm = user_embedding / (np.linalg.norm(user_embedding) + 1e-8)
+            user_norm = event_embedding / (np.linalg.norm(event_embedding) + 1e-8)
             cand_norm = cand_emb / (np.linalg.norm(cand_emb) + 1e-8)
             similarity = np.dot(user_norm, cand_norm)
             similarity = max(0.0, min(1.0, similarity))
@@ -185,13 +217,13 @@ async def _compute_pressure_field(
     intrinsic_relevance = float(candidate.get("intrinsic_relevance", 0.0))
     pressures["intrinsic_relevance"] = min(1.0, max(0.0, intrinsic_relevance))
 
-    content_text = str(candidate.get("content", ""))
-    word_count = len(content_text.split())
-    if word_count > 50 and float(state.care) < 0.4:
-        lecturer_penalty = (word_count / 50.0) * 0.2
-        pressures["lecturer_penalty"] = -lecturer_penalty
-    else:
-        pressures["lecturer_penalty"] = 0.0
+    pressures["persistence"] = max(
+        0.0, min(1.0, float(candidate.get("persistence", 0.0)))
+    )
+    pressures["internal_activation"] = max(
+        0.0, min(1.0, float(candidate.get("internal_activation", 0.0)))
+    )
+    pressures["authority"] = _authority_weight(candidate)
 
     return pressures
 
@@ -292,18 +324,17 @@ def _softmax(scores: List[float], temperature: float) -> List[float]:
     return (exp_vals / np.sum(exp_vals)).tolist()
 
 
-def broadcast_feedback(elected: List[WorkspaceItem], state: HariState) -> None:
-    if not elected: return
+def broadcast_feedback(elected: List[WorkspaceItem], state: HariState) -> Dict[str, float]:
+    """Return workspace composition telemetry without modifying state."""
+    if not elected:
+        return {"curiosity_ratio": 0.0, "narrative_ratio": 0.0, "internal_ratio": 0.0, "n": 0}
     n = len(elected)
-    curiosity_ratio = sum(1 for item in elected if item.item_type == "curiosity_node") / n
-    narrative_ratio = sum(1 for item in elected if item.item_type == "narrative_thread") / n
-    internal_ratio = sum(1 for item in elected if item.payload.get("source") == "internal_cognition") / n
-    state.update({
-        "curiosity": curiosity_ratio * 0.80,
-        "completion": narrative_ratio * 0.80,
-        "coherence": (narrative_ratio * 0.80 + internal_ratio * 0.80),
-        "momentum": (internal_ratio * 0.80 + curiosity_ratio * 0.80),
-    }, source="BROADCAST", reason="workspace_feedback")
+    return {
+        "curiosity_ratio": sum(1 for item in elected if item.item_type == "curiosity_node") / n,
+        "narrative_ratio": sum(1 for item in elected if item.item_type == "narrative_thread") / n,
+        "internal_ratio": sum(1 for item in elected if item.payload.get("source") == "internal_cognition") / n,
+        "n": n,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -324,6 +355,8 @@ async def load_workspace(
     previous_workspace_items: Optional[List[WorkspaceItem]] = None,
     thought_persistence_urge: float = 0.0,
     instrumentation: Optional[AttentionInstrumentation] = None,   # NEW
+    active_thought_texts: Optional[List[str]] = None,
+    refractory: Optional[Any] = None,
 ) -> Tuple[List[WorkspaceItem], Dict[str, Any]]:
     """
     Loads the cognitive workspace using pressure fields + softmax competition.
@@ -335,14 +368,28 @@ async def load_workspace(
         workspace_items: Top items selected for this turn (as WorkspaceItem objects).
         telemetry: Detailed log of pressures, scores, and selection probabilities.
     """
-    # 1. Compute user embedding once for the whole turn
-    user_embedding = None
+    # 1. Compute event and active-context embeddings once per turn.
+    event_embedding = None
     if user_input:
         try:
-            user_embedding = await embed(user_input)
-            user_embedding = np.array(user_embedding, dtype=np.float32)
+            event_embedding = np.array(await embed(user_input), dtype=np.float32)
         except Exception as e:
-            logger.warning(f"Failed to compute user embedding: {e}")
+            logger.warning(f"Failed to compute event embedding: {e}")
+
+    active_context_embedding = None
+    if active_thought_texts:
+        try:
+            embeddings = [
+                await embed(text)
+                for text in active_thought_texts[:5]
+                if text and text.strip()
+            ]
+            if embeddings:
+                active_context_embedding = np.mean(
+                    np.array(embeddings, dtype=np.float32), axis=0
+                )
+        except Exception as e:
+            logger.debug(f"Failed to compute active context embedding: {e}")
 
     # 2. Build candidate pool (new items + inertia items)
     candidates = []  # each: (salience, item_type, original_dict, pressures)
@@ -484,7 +531,13 @@ async def load_workspace(
     # Compute pressures and total salience for each candidate
     enriched_candidates = []
     for _, item_type, source_id, payload, _ in candidates:
-        pressures = await _compute_pressure_field(payload, state, user_embedding, prediction_error)
+        pressures = await _compute_pressure_field(
+            payload,
+            state,
+            event_embedding,
+            active_context_embedding,
+            prediction_error,
+        )
 
         # === Observational: Log generativity estimates (Ticket 011) ===
         # This does NOT influence cognition. It only logs estimates for validation.
@@ -498,8 +551,10 @@ async def load_workspace(
         # Inertia boost
         if previous_workspace_items:
             for old in previous_workspace_items:
-                if old.id == source_id:
-                    pressures["relevance"] = (pressures["relevance"] + old.metrics.activation) / 2
+                if old.source == source_id:
+                    pressures["event_affinity"] = (
+                        pressures.get("event_affinity", 0.5) + old.metrics.activation
+                    ) / 2
                     break
         
         # Base salience from pressures (NOW with instrumentation and all parameters)
@@ -521,6 +576,16 @@ async def load_workspace(
             overlap = len(resp_words.intersection(cand_words)) / max(len(resp_words), 1)
             if overlap > 0.4:          # >40% word overlap with last response
                 total_salience *= 0.2   # 80% penalty
+
+        if refractory is not None:
+            penalty = refractory.apply_penalty(
+                candidate_id=source_id,
+                candidate_embedding=payload.get("embedding"),
+                current_turn=current_turn,
+            )
+            pressures["refractory_penalty"] = penalty
+            if os.getenv("ENABLE_SEMANTIC_REFRACTORY", "false").lower() == "true" and penalty < 1.0:
+                total_salience *= penalty
         
         # Memory fatigue and explanatory power
         usage_count = payload.get("usage_count", 0)
