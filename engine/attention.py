@@ -59,6 +59,20 @@ def _authority_weight(candidate: Dict[str, Any]) -> float:
         return 0.6
     return 0.4
 
+_seeded_rng = None
+
+def _rng():
+    global _seeded_rng
+    seed = os.getenv("EXPERIMENT_SEED", "").strip()
+    if seed:
+        if _seeded_rng is None:
+            try:
+                _seeded_rng = np.random.default_rng(int(seed))
+            except ValueError:
+                _seeded_rng = np.random.default_rng()
+        return _seeded_rng
+    return np.random.default_rng()
+
 # -----------------------------------------------------------------------------
 # Data Models – Container Pattern + Inertia Metrics
 # -----------------------------------------------------------------------------
