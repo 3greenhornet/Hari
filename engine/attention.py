@@ -867,6 +867,7 @@ async def load_workspace_secured(
 
 async def settle_workspace(
     *,
+    session_id: str,
     memories: List[MemoryEvent],
     hypotheses: List[Dict[str, Any]],
     curiosity_nodes: List[Dict[str, Any]],
@@ -967,7 +968,7 @@ async def settle_workspace(
             winner_emb = await embed(winner_content)
             spread_memories = await retrieve_candidates_hybrid(
                 query=winner_content,
-                session_id=state.session_id,
+                session_id=session_id,
                 current_turn=current_turn + round_idx,
                 state_drives={"curiosity": state.curiosity,
                               "completion": state.completion,

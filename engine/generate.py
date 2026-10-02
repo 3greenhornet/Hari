@@ -4,6 +4,7 @@ import json
 import logging
 import asyncio
 import math
+import hashlib
 import numpy as np
 from typing import List, Dict, Any, Optional, Set
 
@@ -18,7 +19,7 @@ from psyche.state import HariState
 from psyche.grace import GraceTracker
 from engine.memory import store_memory, embed
 from engine.prediction import compute_prediction_error
-from engine.attention import load_workspace, broadcast_feedback, WorkspaceItem, load_workspace_secured
+from engine.attention import load_workspace, broadcast_feedback, WorkspaceItem, load_workspace_secured, settle_workspace
 from engine.stage1_monologue import run_monologue
 from models.memory_event import MemoryEvent
 from engine.generativity_estimator import get_estimator
@@ -89,9 +90,9 @@ class TurnPipeline:
         )
         self._cycle_lock = asyncio.Lock()
 
-    async def execute(self, user_input: str, turn_count: int, trace_id: Optional[str] = None, seed="event") -> Dict[str, Any]:
+    async def execute(self, external_event: str, turn_count: int, trace_id: Optional[str] = None, seed="event") -> Dict[str, Any]:
         async with self._cycle_lock:
-            return await self._execute_inner(user_input, turn_count, trace_id, seed)
+            return await self._execute_inner(external_event, turn_count, trace_id, seed)
 
     async def _execute_inner(self, external_event: str, turn_count: int, trace_id: Optional[str] = None, seed="event") -> Dict[str, Any]:
         # 1. Prediction Error
@@ -102,7 +103,21 @@ class TurnPipeline:
         
         self._event_logger.log_user_input(external_event)
 
-        self.active_thought_store.decay_all()
+        try:
+            graph_mgr = await get_graph_manager(self.session_id)
+            connectivity_map = {}
+            for thought in self.active_thought_store.all():
+                node_id_candidate = f"{self.session_id}_{hashlib.sha256(thought.text.strip().lower().encode()).hexdigest()[:16]}"
+                if graph_mgr._graph is not None and node_id_candidate in graph_mgr._graph:
+                    neighbors = list(graph_mgr._graph.neighbors(node_id_candidate))
+                    total_weight = sum(
+                        float(graph_mgr._graph[node_id_candidate][n].get("weight", 0.0))
+                        for n in neighbors
+                    )
+                    connectivity_map[self.active_thought_store._key(thought.text)] = min(1.0, total_weight)
+            self.active_thought_store.decay_all(connectivity_map)
+        except Exception:
+            self.active_thought_store.decay_all()
 
         # Memory retrieval uses ONLY the external event; inertia is handled separately.
         blended_query = external_event
@@ -532,16 +547,27 @@ class TurnPipeline:
                 logger.debug(f"Spreading activation failed: {e}")
         open_threads.extend(springboard_candidates)
 
-        return await load_workspace(
-            memories=memory_candidates, hypotheses=hypotheses, curiosity_nodes=curiosity_nodes,
-            narrative_threads=narrative_threads, open_threads=open_threads,
-            state=self.state, external_event=external_event, prediction_error=prediction_error,
-            current_turn=current_turn, workspace_size=workspace_size,
+        graph_mgr = await get_graph_manager(self.session_id)
+        return await settle_workspace(
+            memories=memory_candidates,
+            hypotheses=hypotheses,
+            curiosity_nodes=curiosity_nodes,
+            narrative_threads=narrative_threads,
+            open_threads=open_threads,
+            state=self.state,
+            external_event=external_event,
+            prediction_error=prediction_error,
+            current_turn=current_turn,
+            session_id=self.session_id,
+            graph_manager=graph_mgr,
+            workspace_size=workspace_size,
             previous_workspace_items=self._previous_workspace,
             thought_persistence_urge=thought_urge,
             instrumentation=self.attention_instrumentation,
-            active_thought_texts=[thought.text for thought in self.active_thought_store.top(8) if thought.text],
+            active_thought_texts=[t.text for t in self.active_thought_store.top(8) if t.text],
             refractory=self._semantic_refractory,
+            attention_config=self.attention_config,
+            max_rounds=3,
         )
 
     async def _resolve_cognitive_stance(
