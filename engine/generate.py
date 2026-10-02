@@ -82,6 +82,7 @@ class TurnPipeline:
         self._reflexion_controller = ReflexionController()
         self._last_homeostatic_reward = 0.0
         self.active_thought_store = ActiveThoughtStore()
+        self._recent_winner_contents: List[str] = []
         from engine.semantic_refractory import SemanticRefractory
         self._semantic_refractory = SemanticRefractory(
             refractory_turns=cfg.REFRACTORY_TURNS,
@@ -224,6 +225,13 @@ class TurnPipeline:
             proactive_candidates=proactive_candidates,
             internal_context=internal_context,
         )
+        
+        # Track winner for stagnation detection
+        if workspace_items:
+            self._recent_winner_contents.append(workspace_items[0].content[:300])
+            if len(self._recent_winner_contents) > 5:
+                self._recent_winner_contents = self._recent_winner_contents[-5:]
+
         promoted_thoughts = self.active_thought_store.observe_winners(workspace_items, turn_count)
         self.active_thought_store.trim()
         if workspace_items:
@@ -334,6 +342,26 @@ class TurnPipeline:
         else:
             expression_permitted = True
             expression_reason = "event_attended_and_speech_invited"
+            
+            # Stagnation check
+            stagnation_boost = 0.0
+            if len(self._recent_winner_contents) >= 3:
+                try:
+                    recent_embs = [await embed(c) for c in self._recent_winner_contents[-3:]]
+                    sims = []
+                    for i in range(len(recent_embs)):
+                        for j in range(i + 1, len(recent_embs)):
+                            a = np.array(recent_embs[i], dtype=np.float32)
+                            b = np.array(recent_embs[j], dtype=np.float32)
+                            a = a / (np.linalg.norm(a) + 1e-8)
+                            b = b / (np.linalg.norm(b) + 1e-8)
+                            sims.append(float(np.dot(a, b)))
+                    if sims and sum(sims) / len(sims) > 0.85:
+                        stagnation_boost = 0.3
+                        logger.info("Stagnation detected; raising temperature by %.2f", stagnation_boost)
+                except Exception as e:
+                    logger.debug("Stagnation check failed: %s", e)
+
             if ENABLE_PRM:
                 dialogue = await self._generate_dialogue_with_prm(
                     workspace_items, external_event, turn_count, surprise, trace_id
@@ -346,6 +374,7 @@ class TurnPipeline:
                     surprise=surprise,
                     trace_id=trace_id,
                     stance=stance,
+                    stagnation_boost=stagnation_boost,
                 )
         self._last_assistant_response = dialogue or ""
 
@@ -660,6 +689,7 @@ Output valid JSON only.
         trace_id: Optional[str] = None,
         behavior: Optional[Any] = None,
         stance: Optional[CognitiveStance] = None,
+        stagnation_boost: float = 0.0,
     ) -> str:
         identity_model = getattr(self, "identity_model", None)
         system_prompt = build_system_prompt_from_identity(identity_model=identity_model, context="dialogue")
@@ -744,7 +774,7 @@ She does not need to obey a script. She just needs to express her state.
         dominance = float(getattr(self.state, "dominance", 0.0))
         novelty = float(getattr(self.state, "novelty", 0.0))
         coherence = float(getattr(self.state, "coherence", 0.5))
-        temperature = max(0.1, min(1.5, 0.4 + (arousal * 0.5) + (novelty * 0.4) - (dominance * 0.2)))
+        temperature = max(0.1, min(1.5, 0.4 + (arousal * 0.5) + (novelty * 0.4) - (dominance * 0.2) + stagnation_boost))
         top_p = max(0.1, min(1.0, 1.0 - (coherence * 0.4)))
 
         dialogue = None
