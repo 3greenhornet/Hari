@@ -140,7 +140,7 @@ class WorkspaceItem:
 async def _compute_pressure_field(
     candidate: Dict[str, Any],
     state: HariState,
-    event_embedding: Optional[np.ndarray],
+    external_event_embedding: Optional[np.ndarray],
     active_context_embedding: Optional[np.ndarray],
     prediction_error: float,
 ) -> Dict[str, float]:
@@ -152,10 +152,10 @@ async def _compute_pressure_field(
     # 1. Event affinity: cosine similarity with the incoming event.
     relevance = 0.5   # default neutral
     candidate_embedding = candidate.get("embedding")
-    if event_embedding is not None and candidate_embedding is not None:
+    if external_event_embedding is not None and candidate_embedding is not None:
         try:
             candidate_emb = np.array(candidate_embedding, dtype=np.float32)
-            event_norm = event_embedding / (np.linalg.norm(event_embedding) + 1e-8)
+            event_norm = external_event_embedding / (np.linalg.norm(external_event_embedding) + 1e-8)
             cand_norm = candidate_emb / (np.linalg.norm(candidate_emb) + 1e-8)
             cos_sim = np.dot(event_norm, cand_norm)
             relevance = (cos_sim + 1) / 2
@@ -176,10 +176,10 @@ async def _compute_pressure_field(
 
     # 2. Novelty (candidate-specific surprise)
     candidate_embedding = candidate.get("embedding")
-    if event_embedding is not None and candidate_embedding is not None:
+    if external_event_embedding is not None and candidate_embedding is not None:
         try:
             cand_emb = np.array(candidate_embedding, dtype=np.float32)
-            user_norm = event_embedding / (np.linalg.norm(event_embedding) + 1e-8)
+            user_norm = external_event_embedding / (np.linalg.norm(external_event_embedding) + 1e-8)
             cand_norm = cand_emb / (np.linalg.norm(cand_emb) + 1e-8)
             similarity = np.dot(user_norm, cand_norm)
             similarity = max(0.0, min(1.0, similarity))
@@ -362,7 +362,7 @@ async def load_workspace(
     narrative_threads: List[NarrativeThread],
     open_threads: List[Dict[str, Any]],
     state: HariState,
-    user_input: str,
+    external_event: str,
     prediction_error: float,
     current_turn: int,
     workspace_size: int = 5,
@@ -383,10 +383,10 @@ async def load_workspace(
         telemetry: Detailed log of pressures, scores, and selection probabilities.
     """
     # 1. Compute event and active-context embeddings once per turn.
-    event_embedding = None
-    if user_input:
+    external_event_embedding = None
+    if external_event:
         try:
-            event_embedding = np.array(await embed(user_input), dtype=np.float32)
+            external_event_embedding = np.array(await embed(external_event), dtype=np.float32)
         except Exception as e:
             logger.warning(f"Failed to compute event embedding: {e}")
 
@@ -548,7 +548,7 @@ async def load_workspace(
         pressures = await _compute_pressure_field(
             payload,
             state,
-            event_embedding,
+            external_event_embedding,
             active_context_embedding,
             prediction_error,
         )
@@ -803,7 +803,7 @@ def apply_workspace_diversity_penalty(
 
 
 async def load_workspace_secured(
-    user_input: str,
+    external_event: str,
     session_id: str,
     current_turn: int,
     state: HariState,
@@ -824,7 +824,7 @@ async def load_workspace_secured(
 
     # Layer 1: Primary hybrid retrieval
     candidates = await retrieve_candidates_hybrid(
-        query=user_input,
+        query=external_event,
         session_id=session_id,
         current_turn=current_turn,
         state_drives=state_drives,
@@ -882,7 +882,7 @@ async def settle_workspace(
     narrative_threads: List[NarrativeThread],
     open_threads: List[Dict[str, Any]],
     state: HariState,
-    user_input: str,
+    external_event: str,
     prediction_error: float,
     current_turn: int,
     graph_manager,
@@ -913,7 +913,7 @@ async def settle_workspace(
             narrative_threads=narrative_threads,
             open_threads=all_candidates,
             state=state,
-            user_input=user_input,
+            external_event=external_event,
             prediction_error=prediction_error,
             current_turn=current_turn + round_idx,
             workspace_size=workspace_size,
@@ -976,7 +976,7 @@ async def settle_workspace(
             winner_emb = await embed(winner_content)
             spread_memories = await retrieve_candidates_hybrid(
                 query=winner_content,
-                session_id=state_session_id,
+                session_id=state.session_id,
                 current_turn=current_turn + round_idx,
                 state_drives={"curiosity": state.curiosity,
                               "completion": state.completion,

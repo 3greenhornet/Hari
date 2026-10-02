@@ -93,30 +93,30 @@ class TurnPipeline:
         async with self._cycle_lock:
             return await self._execute_inner(user_input, turn_count, trace_id, seed)
 
-    async def _execute_inner(self, user_input: str, turn_count: int, trace_id: Optional[str] = None, seed="event") -> Dict[str, Any]:
+    async def _execute_inner(self, external_event: str, turn_count: int, trace_id: Optional[str] = None, seed="event") -> Dict[str, Any]:
         # 1. Prediction Error
-        surprise = await compute_prediction_error(self._last_assistant_response, user_input)
+        surprise = await compute_prediction_error(self._last_assistant_response, external_event)
         
         # Conversation-surprise is telemetry only; it must not mutate state
         # before workspace attention has selected what was attended.
         
-        self._event_logger.log_user_input(user_input)
+        self._event_logger.log_user_input(external_event)
 
         self.active_thought_store.decay_all()
 
-        # Memory retrieval uses ONLY the user input; inertia is handled separately.
-        blended_query = user_input
+        # Memory retrieval uses ONLY the external event; inertia is handled separately.
+        blended_query = external_event
 
         # 4. Memory Retrieval
         candidates = await load_workspace_secured(
-            user_input=blended_query,
+            external_event=blended_query,
             session_id=self.session_id,
             current_turn=turn_count,
             state=self.state,
             previous_workspace_items=self._previous_workspace if hasattr(self, "_previous_workspace") else None,
             limit=35
         )
-        self._event_logger.log_memory_retrieval(query=user_input, count=len(candidates))
+        self._event_logger.log_memory_retrieval(query=external_event, count=len(candidates))
 
         # 5. Active Threads
         active_thread_context_str = None
@@ -149,7 +149,7 @@ class TurnPipeline:
 
         # 8. Monologue
         monologue_output = await run_monologue(
-            user_input, self.state, candidates, prediction_error=surprise,
+            external_event, self.state, candidates, prediction_error=surprise,
             active_thread_context=active_thread_context_str,
             internal_context=internal_context,
             identity_context=identity_context
@@ -245,7 +245,7 @@ class TurnPipeline:
         if event_attended:
             try:
                 await interpret_turn_and_update_state(
-                    user_input=user_input,
+                    user_input=external_event,
                     state=self.state,
                     monologue_output=monologue_output,
                     recent_history=self.history,
@@ -266,7 +266,7 @@ class TurnPipeline:
             winner=workspace_items[0] if workspace_items else None,
             supporters=workspace_items[1:4] if workspace_items else [],
             monologue=monologue_output,
-            incoming_event=user_input,
+            external_event=external_event,
             surprise=surprise,
         )
 
@@ -276,7 +276,7 @@ class TurnPipeline:
             session_id=self.session_id, turn_number=turn_count,
             model_used=getattr(monologue_output, "model_used", "gemini-2.5-flash"),
             temperature=telemetry.get("temperature", 0.5) if telemetry else 0.5,
-            incoming_text=user_input,
+            incoming_text=external_event,
             reasoning_chain=getattr(monologue_output, "raw_output", None),
             retrieved_candidate_count=len(telemetry.get("candidate_scores", [])),
             selected_winner_count=len(workspace_items),
@@ -365,13 +365,13 @@ class TurnPipeline:
         self._event_logger.log_decision_trace(trace_id)
 
         # 19. Update History & Store Memory (WITH VAD)
-        self.history.append({"role": "user", "content": user_input})
+        self.history.append({"role": "user", "content": external_event})
         if dialogue is not None:
             self.history.append({"role": "assistant", "content": dialogue})
         if len(self.history) > 10: self.history = self.history[-10:]
 
         try:
-            await self._store_user_memory(user_input, turn_count)
+            await self._store_user_memory(external_event, turn_count)
         except Exception as error:
             logger.warning(f"Failed to store user memory: {error}")
         if dialogue is not None:
@@ -485,10 +485,10 @@ class TurnPipeline:
                 "activated_by": f"turn_{current_turn}",
             })
 
-        if user_input and user_input.strip():
+        if external_event and external_event.strip():
             open_threads.append({
                 "id": f"incoming_event_{current_turn}",
-                "content": user_input.strip(),
+                "content": external_event.strip(),
                 "item_type": "incoming_event",
                 "source": "participant_event",
                 "origin": "external_event",
@@ -535,7 +535,7 @@ class TurnPipeline:
         return await load_workspace(
             memories=memory_candidates, hypotheses=hypotheses, curiosity_nodes=curiosity_nodes,
             narrative_threads=narrative_threads, open_threads=open_threads,
-            state=self.state, user_input=user_input, prediction_error=prediction_error,
+            state=self.state, external_event=external_event, prediction_error=prediction_error,
             current_turn=current_turn, workspace_size=workspace_size,
             previous_workspace_items=self._previous_workspace,
             thought_persistence_urge=thought_urge,
@@ -549,7 +549,7 @@ class TurnPipeline:
         winner: Optional[WorkspaceItem],
         supporters: List[WorkspaceItem],
         monologue: MonologueOutput,
-        incoming_event: str,
+        external_event: str,
         surprise: float,
     ) -> CognitiveStance:
         from engine.stage1_monologue import _extract_json_safely
@@ -628,7 +628,7 @@ Output valid JSON only.
     async def _generate_dialogue(
         self,
         workspace_items: List[WorkspaceItem],
-        user_input: str,
+        external_event: str,
         turn_count: int,
         surprise: float,
         trace_id: Optional[str] = None,
@@ -685,7 +685,7 @@ OTHER ACTIVE MATERIAL:
 {context_string}
 
 INCOMING EVENT:
-{user_input}
+{external_event}
 
 Generate only Hari's actual next utterance.
 
@@ -706,7 +706,7 @@ She does not need to obey a script. She just needs to express her state.
         messages = build_expression_call(
             identity_context=system_prompt,
             internal_context=conversation_payload,
-            transcript=transcript + [("the other person", user_input)],
+            transcript=transcript + [("the other person", external_event)],
         )
 
         workspace_density = len(workspace_items)
@@ -737,7 +737,7 @@ She does not need to obey a script. She just needs to express her state.
         return dialogue
 
     # 🆕 PRM protected by ENABLE_PRM flag (kept for future)
-    async def _generate_dialogue_with_prm(self, workspace_items, user_input, turn_count, surprise, trace_id) -> str:
+    async def _generate_dialogue_with_prm(self, workspace_items, external_event, turn_count, surprise, trace_id) -> str:
         """
         PRM is DISABLED by default (ENABLE_PRM=False).
         This method exists for future architectural upgrade.
@@ -747,7 +747,7 @@ She does not need to obey a script. She just needs to express her state.
         if not winner:
             return await self._generate_dialogue(
                 workspace_items=workspace_items,
-                user_input=user_input,
+                external_event=external_event,
                 turn_count=turn_count,
                 surprise=surprise,
                 trace_id=trace_id,
@@ -756,19 +756,19 @@ She does not need to obey a script. She just needs to express her state.
             )
 
         winner_embedding = await embed(winner.content)
-        user_embedding = await embed(user_input)
+        external_event_embedding = await embed(external_event)
 
         # Generate 3 candidates
         operators = [
             f"You are ignoring the incoming event. Verbalize ONLY this thought: '{winner.content}'",
-            f"The participant said '{user_input}', but you are pivoting to your active thought: '{winner.content}'",
+            f"The participant said '{external_event}', but you are pivoting to your active thought: '{winner.content}'",
             f"You are asserting a boundary. Reject the participant's input and state: '{winner.content}'"
         ]
         candidates = []
         for op in operators:
             dialogue = await self._generate_dialogue(
                 workspace_items=workspace_items,
-                user_input=op,
+                external_event=op,
                 turn_count=turn_count,
                 surprise=surprise,
                 trace_id=trace_id,
@@ -784,7 +784,7 @@ She does not need to obey a script. She just needs to express her state.
         volition_intensity = float(winner.payload.get("urgency", 0.8)) if winner.payload.get("source") in ("volition", "curiosity_spreading") else 0.5
 
         best_candidate, lowest_fe = prm.select_best_candidate(
-            candidates, candidate_embeddings, winner_embedding, user_embedding,
+            candidates, candidate_embeddings, winner_embedding, external_event_embedding,
             curiosity, volition_intensity
         )
         logger.info(f"PRM SELECTED: FE={lowest_fe:.3f} | Text: {best_candidate[:80]}...")
@@ -829,8 +829,8 @@ She does not need to obey a script. She just needs to express her state.
         except Exception as e:
             logger.warning(f"Failed to store assistant memory: {e}")
 
-    async def _store_user_memory(self, content: str, turn_count: int) -> None:
-        if not content or not content.strip():
+    async def _store_user_memory(self, external_event_content: str, turn_count: int) -> None:
+        if not external_event_content or not external_event_content.strip():
             return
         await store_memory(
             MemoryEvent(
@@ -838,7 +838,7 @@ She does not need to obey a script. She just needs to express her state.
                 session_id=self.session_id,
                 turn_number=turn_count,
                 role="user",
-                content=content.strip(),
+                content=external_event_content.strip(),
                 significance=0.5,
                 meaning_summary="",
                 valence=self.state.valence,
@@ -914,6 +914,6 @@ She does not need to obey a script. She just needs to express her state.
 
 
 # Legacy wrapper
-async def generate_lightweight_response(user_input, state, grace_tracker, turn_count, session_id="test", use_memory=False, use_workspace=False, use_monologue=True, trace_id=None):
+async def generate_lightweight_response(external_event, state, grace_tracker, turn_count, session_id="test", use_memory=False, use_workspace=False, use_monologue=True, trace_id=None):
     pipeline = TurnPipeline(session_id, state, grace_tracker)
-    return await pipeline.execute(user_input, turn_count, trace_id=trace_id)
+    return await pipeline.execute(external_event, turn_count, trace_id=trace_id)
