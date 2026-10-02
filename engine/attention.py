@@ -1,4 +1,4 @@
-"""
+﻿"""
 engine/attention.py — Cognitive Workspace & Attention System (Pressure‑Field Architecture)
 
 Implements a Global Workspace Theory (GWT) selection–broadcast cycle using a
@@ -871,3 +871,129 @@ async def load_workspace_secured(
     # Apply diversity penalty
     diversified = apply_workspace_diversity_penalty(candidates, target_count=15)
     return diversified
+3. Multi-round settling
+3.1 engine/attention.py — add at bottom of file
+python
+async def settle_workspace(
+    *,
+    memories: List[MemoryEvent],
+    hypotheses: List[Dict[str, Any]],
+    curiosity_nodes: List[Dict[str, Any]],
+    narrative_threads: List[NarrativeThread],
+    open_threads: List[Dict[str, Any]],
+    state: HariState,
+    user_input: str,
+    prediction_error: float,
+    current_turn: int,
+    graph_manager,
+    workspace_size: int = 5,
+    previous_workspace_items: Optional[List[WorkspaceItem]] = None,
+    thought_persistence_urge: float = 0.0,
+    instrumentation: Optional[AttentionInstrumentation] = None,
+    active_thought_texts: Optional[List[str]] = None,
+    refractory: Optional[Any] = None,
+    attention_config: Optional[AttentionCalibration] = None,
+    max_rounds: int = 3,
+) -> Tuple[List[WorkspaceItem], Dict[str, Any]]:
+    """Bounded recurrent settling. Winner of each round seeds next round."""
+
+    all_candidates = list(open_threads or [])
+    winner_history: List[str] = []
+    final_winner: Optional[WorkspaceItem] = None
+    final_supporters: List[WorkspaceItem] = []
+    round_count = 0
+
+    for round_idx in range(max_rounds):
+        round_count = round_idx + 1
+
+        workspace_items, telemetry = await load_workspace(
+            memories=memories,
+            hypotheses=hypotheses,
+            curiosity_nodes=curiosity_nodes,
+            narrative_threads=narrative_threads,
+            open_threads=all_candidates,
+            state=state,
+            user_input=user_input,
+            prediction_error=prediction_error,
+            current_turn=current_turn + round_idx,
+            workspace_size=workspace_size,
+            previous_workspace_items=previous_workspace_items if round_idx == 0 else None,
+            thought_persistence_urge=thought_persistence_urge,
+            instrumentation=instrumentation,
+            active_thought_texts=active_thought_texts,
+            refractory=refractory,
+            attention_config=attention_config,
+        )
+
+        if not workspace_items:
+            break
+
+        winner = workspace_items[0]
+        winner_content = winner.content
+        winner_history.append(winner_content)
+
+        # Convergence: same winner two rounds in a row
+        if len(winner_history) >= 2 and winner_history[-1] == winner_history[-2]:
+            final_winner = winner
+            final_supporters = workspace_items[1:]
+            break
+
+        final_winner = winner
+        final_supporters = workspace_items[1:]
+
+        # Last round: don't need to seed
+        if round_idx == max_rounds - 1:
+            break
+
+        # Seed spreading activation from winner
+        if graph_manager is not None:
+            try:
+                graph_manager.seed_from_text(winner_content, weight=1.0)
+                new_activated = graph_manager.step_activation()
+                for node in new_activated:
+                    all_candidates.append({
+                        "id": f"spread_{node['id']}_r{round_idx}",
+                        "content": node["question"],
+                        "urgency": float(node["activation"]),
+                        "item_type": "curiosity_node",
+                        "source": "curiosity_spreading",
+                        "internal_source": "spread_activation",
+                        "internal_activation": float(node["activation"]),
+                        "intrinsic_relevance": float(node["activation"]) * 1.2,
+                        "persistence": 0.7 if node.get("is_primed") else 0.4,
+                        "origin": "curiosity_spreading",
+                        "activated_by": f"winner_round_{round_idx}",
+                        "information_gap": float(node["activation"]),
+                        "closure_pressure": 0.15 * float(node["activation"]),
+                        "coherence_factor": 0.25 * float(node["activation"]),
+                    })
+            except Exception as e:
+                logger.debug("Spread activation failed: %s", e)
+
+        # Also retrieve memories similar to winner
+        try:
+            from engine.memory import embed, retrieve_candidates_hybrid
+            winner_emb = await embed(winner_content)
+            spread_memories = await retrieve_candidates_hybrid(
+                query=winner_content,
+                session_id=state_session_id,
+                current_turn=current_turn + round_idx,
+                state_drives={"curiosity": state.curiosity,
+                              "completion": state.completion,
+                              "coherence": state.coherence,
+                              "care": state.care},
+                limit=5,
+            )
+            memories = list(memories) + [m for m in spread_memories
+                                          if m.id not in {mm.id for mm in memories}]
+        except Exception as e:
+            logger.debug("Spread memory retrieval failed: %s", e)
+
+    if final_winner is None and winner_history:
+        # fallback: use last winner
+        pass
+
+    return [final_winner] + final_supporters if final_winner else [], {
+        "rounds": round_count,
+        "winner_history": winner_history,
+    }
