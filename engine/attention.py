@@ -6,7 +6,7 @@ multi‑dimensional pressure field.
 
 Each cognitive candidate (memory, hypothesis, curiosity, narrative, open thread)
 is evaluated across four pressures:
-  - Relevance Pressure   (semantic alignment with user input)
+  - Relevance Pressure   (semantic alignment with external event)
   - Novelty Pressure     (prediction error / surprise)
   - Curiosity Pressure   (knowledge gaps)
   - Completion Pressure  (momentum to finish ongoing thoughts)

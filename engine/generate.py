@@ -201,7 +201,7 @@ class TurnPipeline:
 
         # 12. Workspace Allocation
         workspace_items, telemetry = await self._allocate_workspace(
-            user_input,
+            external_event,
             candidates,
             monologue_output,
             surprise,
@@ -321,12 +321,12 @@ class TurnPipeline:
             expression_reason = "event_attended_and_speech_invited"
             if ENABLE_PRM:
                 dialogue = await self._generate_dialogue_with_prm(
-                    workspace_items, user_input, turn_count, surprise, trace_id
+                    workspace_items, external_event, turn_count, surprise, trace_id
                 )
             else:
                 dialogue = await self._generate_dialogue(
                     workspace_items=workspace_items,
-                    user_input=user_input,
+                    external_event=external_event,
                     turn_count=turn_count,
                     surprise=surprise,
                     trace_id=trace_id,
@@ -350,7 +350,7 @@ class TurnPipeline:
         trace.generated_response = dialogue
         trace.drives_after = {k: getattr(self.state, k) for k in ["care","curiosity","maintenance","completion","coherence","rest","valence","arousal","dominance"]}
         winner_item = workspace_items[0] if workspace_items else None
-        trace.event_present = bool(user_input and user_input.strip())
+        trace.event_present = bool(external_event and external_event.strip())
         trace.event_was_winner = bool(winner_item and winner_item.item_type == "incoming_event")
         trace.event_was_supporting = event_attended
         trace.event_was_ignored = trace.event_present and not event_attended
@@ -422,7 +422,7 @@ class TurnPipeline:
             "behavior_mode": behavior.mode
         }
 
-    async def _allocate_workspace(self, user_input, memory_candidates, monologue, prediction_error, current_turn, workspace_size=5, proactive_candidates=None, internal_context=None):
+    async def _allocate_workspace(self, external_event, memory_candidates, monologue, prediction_error, current_turn, workspace_size=5, proactive_candidates=None, internal_context=None):
         thought_urge = getattr(monologue, "thought_continuation_urge", 0.0)
         hypotheses = []
         try:
@@ -575,7 +575,7 @@ class TurnPipeline:
     {surprise:.3f}
 
     INCOMING EVENT:
-    {incoming_event}
+    {external_event}
 
 Return a CognitiveStance with exactly these five fields:
 - focus: what is the center of attention?
@@ -591,7 +591,7 @@ Output valid JSON only.
         messages = build_internal_call(
             system_prompt="You are Hari's cognitive resolver. Output only valid JSON.",
             internal_context=prompt,
-            participant_utterance=incoming_event,
+            participant_utterance=external_event,
         )
 
         for model in FALLBACK_MODELS:
