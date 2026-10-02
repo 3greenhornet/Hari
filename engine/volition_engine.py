@@ -23,6 +23,7 @@ class VolitionEngine:
 
     def __init__(self):
         self._desires: List[Desire] = []
+        self._current_turn_desires: List[Desire] = []
         self._agendas: List[Agenda] = []
         self._projects: List[ActiveProject] = []
 
@@ -30,9 +31,9 @@ class VolitionEngine:
         """
         Generates desires from drive velocities (momentum) and BINDS them to context.
         
-        Clears previous desires first to prevent duplication.
+        Desires are retained as a per-turn snapshot; PursuitRegistry owns persistence.
         """
-        self._desires.clear()
+        self._current_turn_desires = []
         if context is None:
             context = {}
 
@@ -40,7 +41,7 @@ class VolitionEngine:
         if state.curiosity > 0.6:
             top_curiosity = self._get_top_curiosity(context)
             if top_curiosity:
-                self._desires.append(Desire(
+                self._current_turn_desires.append(Desire(
                     desire_id=str(uuid.uuid4()),
                     parent_drive="curiosity",
                     type="understand",
@@ -55,7 +56,7 @@ class VolitionEngine:
         if state.completion > 0.6:
             active_narrative = self._get_active_narrative(context)
             if active_narrative:
-                self._desires.append(Desire(
+                self._current_turn_desires.append(Desire(
                     desire_id=str(uuid.uuid4()),
                     parent_drive="completion",
                     type="finish",
@@ -70,7 +71,7 @@ class VolitionEngine:
         if state.coherence > 0.6:
             active_thought = self._get_active_internal_candidate(context)
             if active_thought:
-                self._desires.append(Desire(
+                self._current_turn_desires.append(Desire(
                     desire_id=str(uuid.uuid4()),
                     parent_drive="coherence",
                     type="share",
@@ -83,7 +84,7 @@ class VolitionEngine:
 
         # 4. Boundary desire (no target needed)
         if state.maintenance > 0.6 and state.engagement < 0.35:
-            self._desires.append(Desire(
+            self._current_turn_desires.append(Desire(
                 desire_id=str(uuid.uuid4()),
                 parent_drive="maintenance",
                 type="assert_boundary",
@@ -108,9 +109,9 @@ class VolitionEngine:
         coh_tension = max(0.0, min(1.0, coh_base + (coh_velocity * 2.0)))
 
         # Only add velocity desires if no target-bound desires exist
-        if not any(d.target_source_id for d in self._desires):
+        if not any(d.target_source_id for d in self._current_turn_desires):
             if comp_tension > 0.1:
-                self._desires.append(Desire(
+                self._current_turn_desires.append(Desire(
                     desire_id=str(uuid.uuid4()),
                     parent_drive="completion",
                     type="finish",
@@ -121,7 +122,7 @@ class VolitionEngine:
                     target_item_type=None
                 ))
             if cur_tension > 0.1:
-                self._desires.append(Desire(
+                self._current_turn_desires.append(Desire(
                     desire_id=str(uuid.uuid4()),
                     parent_drive="curiosity",
                     type="understand",
@@ -132,7 +133,7 @@ class VolitionEngine:
                     target_item_type=None
                 ))
             if coh_tension > 0.1:
-                self._desires.append(Desire(
+                self._current_turn_desires.append(Desire(
                     desire_id=str(uuid.uuid4()),
                     parent_drive="coherence",
                     type="share",
@@ -161,7 +162,7 @@ class VolitionEngine:
         This is where volition becomes ACTION.
         """
         candidates = []
-        for desire in self._desires:
+        for desire in self._current_turn_desires:
             if desire.base_tension <= 0.1:
                 continue
             # A desire without a cognitive target does NOT become a thought.
@@ -183,13 +184,17 @@ class VolitionEngine:
                 "closure_pressure": desire.base_tension * 0.4 if desire.parent_drive == "completion" else 0.1,
                 "coherence_factor": desire.base_tension * 0.3,
             })
-        self._desires.clear()
+        self._current_turn_desires.clear()
         if candidates:
             logger.info(f"Volition generated {len(candidates)} proactive candidates")
         return candidates
 
     def add_desire(self, desire: Desire) -> None:
-        self._desires.append(desire)
+        self._current_turn_desires.append(desire)
+
+    def desires_snapshot(self) -> List[Desire]:
+        """Return the current turn's desires without clearing them."""
+        return list(self._current_turn_desires)
 
     def add_agenda(self, agenda: Agenda) -> None:
         self._agendas.append(agenda)

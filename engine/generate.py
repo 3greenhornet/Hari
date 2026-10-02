@@ -35,6 +35,9 @@ from engine.volition_engine import VolitionEngine
 from engine.behavior import select_behavior
 from engine.reflexion_controller import ReflexionController
 from models.stance import CognitiveStance
+from engine import config as cfg
+from engine.prompting import build_internal_call, build_expression_call
+from psyche.active_thoughts import ActiveThoughtStore
 
 # ---------- Environment Flags ----------
 ENABLE_PRM = os.getenv("ENABLE_PRM", "False").lower() == "true"
@@ -76,16 +79,25 @@ class TurnPipeline:
         self._active_threads = []
         self.current_trajectory_deviation = 0.0
         self._reflexion_controller = ReflexionController()
+        self._last_homeostatic_reward = 0.0
+        self.active_thought_store = ActiveThoughtStore()
+        from engine.semantic_refractory import SemanticRefractory
+        self._semantic_refractory = SemanticRefractory(
+            refractory_turns=cfg.REFRACTORY_TURNS,
+            similarity_threshold=cfg.REFRACTORY_SIMILARITY,
+            max_penalty=cfg.REFRACTORY_MAX_PENALTY,
+        )
 
     async def execute(self, user_input: str, turn_count: int, trace_id: Optional[str] = None) -> Dict[str, Any]:
         # 1. Prediction Error
         surprise = await compute_prediction_error(self._last_assistant_response, user_input)
         
-        # 2. Reflexion (Decoupled state modulation on high surprise)
-        if surprise > 0.8:
-            self._reflexion_controller.process_prediction_failure(self.state, surprise)
+        # Conversation-surprise is telemetry only; it must not mutate state
+        # before workspace attention has selected what was attended.
         
         self._event_logger.log_user_input(user_input)
+
+        self.active_thought_store.decay_all()
 
         # Memory retrieval uses ONLY the user input; inertia is handled separately.
         blended_query = user_input
@@ -137,34 +149,36 @@ class TurnPipeline:
             internal_context=internal_context,
             identity_context=identity_context
         )
+        if not monologue_output.observations and not monologue_output.internal_candidates:
+            self._event_logger.log_substrate_fault(reason="empty_monologue_output")
+        if monologue_output.internal_candidates:
+            top_candidate = max(
+                monologue_output.internal_candidates,
+                key=lambda candidate: float(getattr(candidate, "urgency", 0.0)),
+            )
+            self._last_monologue_fragment = getattr(top_candidate, "content", None)
+        else:
+            self._last_monologue_fragment = None
         self._event_logger.log_monologue_output(monologue_output)
         self.current_trajectory_deviation = getattr(monologue_output, "trajectory_deviation", 0.0)
 
-        # 9. Social Cognition
-        await interpret_turn_and_update_state(
-            user_input=user_input, state=self.state, monologue_output=monologue_output,
-            recent_history=self.history, turn_count=turn_count,
-            relational_manager=self.relational_manager if hasattr(self, 'relational_manager') else None
-        )
-
-        # 9b. Deterministic state cascades (wired 2026-09-26)
-        # These are math-based state drift, not prompts. They were designed
-        # and never called. Activating them now.
-        from psyche.cascades import (
-            apply_fatigue_cascade,
-            apply_sovereignty_cascade,
-            apply_coherence_cascade,
-            apply_completion_cascade,
-            apply_session_horizon,
-        )
-        apply_fatigue_cascade(self.state)
-        apply_sovereignty_cascade(self.state)
-        apply_coherence_cascade(self.state, contradiction_occurred=False)
-        apply_completion_cascade(
-            self.state,
-            num_unresolved_questions=len(getattr(monologue_output, "questions", []) or []),
-        )
-        apply_session_horizon(self.state, turn_count)
+        # 9b. Deterministic state cascades are disabled for Sprint 1.
+        if cfg.ENABLE_DETERMINISTIC_CASCADES:
+            from psyche.cascades import (
+                apply_fatigue_cascade,
+                apply_sovereignty_cascade,
+                apply_coherence_cascade,
+                apply_completion_cascade,
+                apply_session_horizon,
+            )
+            apply_fatigue_cascade(self.state)
+            apply_sovereignty_cascade(self.state)
+            apply_coherence_cascade(self.state, contradiction_occurred=False)
+            apply_completion_cascade(
+                self.state,
+                num_unresolved_questions=len(getattr(monologue_output, "questions", []) or []),
+            )
+            apply_session_horizon(self.state, turn_count)
 
         # 10. Volition (Bound to Context)
         volition_context = dict(internal_context)
@@ -176,56 +190,35 @@ class TurnPipeline:
         if proactive_candidates:
             logger.info(f"Volition injected {len(proactive_candidates)} proactive candidates")
 
-        # 11. Staging Proposals (Hypotheses & Self-Beliefs)
-        if monologue_output.hypothesis_proposal:
-            proposal = monologue_output.hypothesis_proposal
-            try:
-                from db.connection import get_pool
-                pool = await get_pool()
-                if pool:
-                    async with pool.acquire() as conn:
-                        await conn.execute("""
-                            INSERT INTO staging_proposals (
-                                proposal_id, session_id, proposal_type, content, source_module,
-                                source_trace_id, source_turn,
-                                information_gap, closure_pressure, coherence_factor,
-                                confidence_estimate
-                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                        """,
-                            str(uuid.uuid4()), self.session_id, proposal.type, proposal.statement,
-                            'monologue', trace_id or str(uuid.uuid4()), turn_count,
-                            proposal.information_gap, proposal.closure_pressure, proposal.coherence_factor,
-                            proposal.confidence
-                        )
-            except Exception as e: logger.warning(f"Failed to stage hypothesis: {e}")
-        if monologue_output.self_belief_proposal:
-            proposal = monologue_output.self_belief_proposal
-            try:
-                from db.connection import get_pool
-                pool = await get_pool()
-                if pool:
-                    async with pool.acquire() as conn:
-                        await conn.execute("""
-                            INSERT INTO staging_proposals (
-                                proposal_id, session_id, proposal_type, content, source_module,
-                                source_trace_id, source_turn,
-                                information_gap, closure_pressure, coherence_factor,
-                                confidence_estimate
-                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                        """,
-                            str(uuid.uuid4()), self.session_id, 'self_belief', proposal.belief_text,
-                            'monologue', trace_id or str(uuid.uuid4()), turn_count,
-                            proposal.information_gap, proposal.closure_pressure, proposal.coherence_factor,
-                            proposal.confidence
-                        )
-            except Exception as e: logger.warning(f"Failed to stage self-belief: {e}")
-
-        self.grace_tracker.add_engagement_score(0.5)
+        # 11. Proposal formation is handled by consolidation, not Stage 1.
+        if cfg.ENABLE_GRACE:
+            self.grace_tracker.add_engagement_score(0.5)
 
         # 12. Workspace Allocation
         workspace_items, telemetry = await self._allocate_workspace(
-            user_input, candidates, monologue_output, surprise, turn_count, proactive_candidates=proactive_candidates
+            user_input,
+            candidates,
+            monologue_output,
+            surprise,
+            turn_count,
+            proactive_candidates=proactive_candidates,
+            internal_context=internal_context,
         )
+        promoted_thoughts = self.active_thought_store.observe_winners(workspace_items, turn_count)
+        self.active_thought_store.trim()
+        if workspace_items:
+            try:
+                winner = workspace_items[0]
+                embedding = winner.payload.get("embedding")
+                if embedding is None and winner.content:
+                    embedding = await embed(winner.content)
+                self._semantic_refractory.register_winner(
+                    thought_id=winner.id,
+                    embedding=embedding,
+                    current_turn=turn_count,
+                )
+            except Exception as error:
+                logger.debug(f"Refractory registration failed: {error}")
 
         # 13. Mark Narratives
         for item in workspace_items:
@@ -236,11 +229,29 @@ class TurnPipeline:
                     except Exception: pass
 
         # 14. Broadcast & Graph Observation
-        broadcast_feedback(workspace_items, self.state)
+        feedback_summary = broadcast_feedback(workspace_items, self.state)
         try:
-            graph_mgr = await get_graph_manager()
+            graph_mgr = await get_graph_manager(self.session_id)
             await graph_mgr.observe_workspace(workspace_items)
         except Exception as e: logger.debug(f"Workspace observation failed: {e}")
+
+        event_attended = any(item.item_type == "incoming_event" for item in workspace_items)
+        social_update_applied = False
+        if event_attended:
+            try:
+                await interpret_turn_and_update_state(
+                    user_input=user_input,
+                    state=self.state,
+                    monologue_output=monologue_output,
+                    recent_history=self.history,
+                    turn_count=turn_count,
+                    relational_manager=getattr(self, "relational_manager", None),
+                )
+                social_update_applied = True
+            except Exception as error:
+                logger.warning(f"Social cognition failed: {error}")
+        else:
+            logger.info("turn=%s event not attended; social cognition skipped", turn_count)
 
         # 15. Behavior Decision (Observability)
         behavior = select_behavior(workspace_items[0] if workspace_items else None, self.state)
@@ -249,9 +260,8 @@ class TurnPipeline:
         stance = await self._resolve_cognitive_stance(
             winner=workspace_items[0] if workspace_items else None,
             supporters=workspace_items[1:4] if workspace_items else [],
-            behavior=behavior,
             monologue=monologue_output,
-            user_input=user_input,
+            incoming_event=user_input,
             surprise=surprise,
         )
 
@@ -261,14 +271,14 @@ class TurnPipeline:
             session_id=self.session_id, turn_number=turn_count,
             model_used=getattr(monologue_output, "model_used", "gemini-2.5-flash"),
             temperature=telemetry.get("temperature", 0.5) if telemetry else 0.5,
-            user_input=user_input,
+            incoming_text=user_input,
             reasoning_chain=getattr(monologue_output, "raw_output", None),
             retrieved_candidate_count=len(telemetry.get("candidate_scores", [])),
             selected_winner_count=len(workspace_items),
             drives_before=drives_snapshot_before,
-            perceived_user_intent=getattr(monologue_output, "perceived_user_intent", None),
+            perceived_intent=None,
             intent_confidence=getattr(monologue_output, "intent_confidence", None),
-            thematic_continuity=getattr(monologue_output, "thematic_continuity", None),
+            thematic_continuity=None,
             behavior_mode=behavior.mode,
             behavior_source=behavior.source
         )
@@ -290,26 +300,34 @@ class TurnPipeline:
                 intrinsic_relevance=cand.get("intrinsic_relevance", 0.0),
                 persistence=cand.get("persistence", 0.0)
             ))
-        self._run_background_log(self._store_decision_trace(trace))
-
-        # 17. Dialogue Generation (PRM flag-protected)
-        if behavior and behavior.mode == "hold":
-            self._last_assistant_response = ""
-            dialogue = ""
-        elif ENABLE_PRM:
-            dialogue = await self._generate_dialogue_with_prm(
-                workspace_items, user_input, turn_count, surprise, trace_id
-            )
+        # 17. Expression policy. Speech is downstream and optional.
+        expression_permitted = False
+        expression_reason = "event_not_attended"
+        if not event_attended:
+            dialogue = None
+        elif not workspace_items:
+            expression_reason = "no_workspace_items"
+            dialogue = None
+        elif not stance or not getattr(stance, "speech_impulse", "").strip():
+            expression_reason = "stance_no_speech_impulse"
+            dialogue = None
         else:
-            dialogue = await self._generate_dialogue(
-                workspace_items=workspace_items,
-                user_input=user_input,
-                turn_count=turn_count,
-                surprise=surprise,
-                trace_id=trace_id,
-                behavior=behavior,
-                stance=stance,
-            )
+            expression_permitted = True
+            expression_reason = "event_attended_and_speech_invited"
+            if ENABLE_PRM:
+                dialogue = await self._generate_dialogue_with_prm(
+                    workspace_items, user_input, turn_count, surprise, trace_id
+                )
+            else:
+                dialogue = await self._generate_dialogue(
+                    workspace_items=workspace_items,
+                    user_input=user_input,
+                    turn_count=turn_count,
+                    surprise=surprise,
+                    trace_id=trace_id,
+                    stance=stance,
+                )
+        self._last_assistant_response = dialogue or ""
 
         self._event_logger.log_assistant_response(dialogue, 
             [{"type": getattr(item, "item_type", "unknown"), "content": getattr(item, "content", "")[:100]} for item in workspace_items[:5]]
@@ -320,28 +338,51 @@ class TurnPipeline:
             "winner_type": workspace_items[0].item_type if workspace_items else "none",
             "behavior_mode": behavior.mode,
             "stance_focus": stance.focus if stance else "",
-            "response_preview": dialogue[:200],
+            "response_preview": (dialogue or "")[:200],
         }))
 
         # 18. Finalize Trace
         trace.generated_response = dialogue
         trace.drives_after = {k: getattr(self.state, k) for k in ["care","curiosity","maintenance","completion","coherence","rest","valence","arousal","dominance"]}
+        winner_item = workspace_items[0] if workspace_items else None
+        trace.event_present = bool(user_input and user_input.strip())
+        trace.event_was_winner = bool(winner_item and winner_item.item_type == "incoming_event")
+        trace.event_was_supporting = event_attended
+        trace.event_was_ignored = trace.event_present and not event_attended
+        trace.social_update_applied = social_update_applied
+        trace.expression_permitted = expression_permitted
+        trace.expression_reason = expression_reason
+        trace.winner_origin = (
+            winner_item.payload.get("origin") or winner_item.payload.get("source")
+            if winner_item else None
+        )
+        self._run_background_log(self._store_decision_trace(trace))
         self._event_logger.log_decision_trace(trace_id)
 
         # 19. Update History & Store Memory (WITH VAD)
         self.history.append({"role": "user", "content": user_input})
-        self.history.append({"role": "assistant", "content": dialogue})
+        if dialogue is not None:
+            self.history.append({"role": "assistant", "content": dialogue})
         if len(self.history) > 10: self.history = self.history[-10:]
 
-        await self._store_assistant_memory(dialogue, turn_count, significance_override=monologue_output.memory_significance)
+        try:
+            await self._store_user_memory(user_input, turn_count)
+        except Exception as error:
+            logger.warning(f"Failed to store user memory: {error}")
+        if dialogue is not None:
+            significance = max(
+                0.3,
+                min(1.0, 0.5 + float(getattr(self.state, "arousal", 0.0)) * 0.4),
+            )
+            await self._store_assistant_memory(dialogue, turn_count, significance_override=significance)
 
         # 20. Curiosity & Narrative Thread Creation
         if monologue_output.curiosity_trigger:
             try:
-                graph_mgr = await get_graph_manager()
-                await graph_mgr.add_node(question=monologue_output.curiosity_trigger, importance=0.6, session_id=self.session_id, origin_trace_id=trace_id or str(uuid.uuid4()))
+                graph_mgr = await get_graph_manager(self.session_id)
+                await graph_mgr.add_node(question=monologue_output.curiosity_trigger, importance=0.6, origin_trace_id=trace_id or str(uuid.uuid4()))
             except Exception: pass
-        if (monologue_output.curiosity_trigger and len(monologue_output.curiosity_trigger) > 20 and getattr(monologue_output, "thematic_continuity", 0) > 0.7):
+        if monologue_output.curiosity_trigger and len(monologue_output.curiosity_trigger) > 20:
             try:
                 existing_threads = await self.narrative_manager.load_active_threads(turn_count)
                 similar_exists = any(thread.title.lower() in monologue_output.curiosity_trigger.lower() for thread in existing_threads)
@@ -351,11 +392,21 @@ class TurnPipeline:
 
         # 21. State Drift & Flush
         self.state.natural_drift()
+        try:
+            reward_before = self._last_homeostatic_reward
+            reward_after = self.state.compute_homeostatic_reward()
+            violations = self.state.viability_zone_violated()
+            self._last_homeostatic_reward = reward_after
+            self._event_logger.log_homeostatic_reward(
+                reward_before, reward_after, reward_after - reward_before, violations
+            )
+        except Exception as error:
+            logger.debug(f"Homeostatic reward failed: {error}")
         if hasattr(self, 'relational_manager'): self.relational_manager.apply_relational_decay()
         try: await self.narrative_manager.flush_updates()
         except Exception as e: logger.error(f"Failed to flush narrative updates: {e}")
 
-        self.state._last_assistant_response = dialogue
+        self.state._last_assistant_response = dialogue or ""
         self._previous_workspace = workspace_items
 
         return {
@@ -366,7 +417,7 @@ class TurnPipeline:
             "behavior_mode": behavior.mode
         }
 
-    async def _allocate_workspace(self, user_input, memory_candidates, monologue, prediction_error, current_turn, workspace_size=5, proactive_candidates=None):
+    async def _allocate_workspace(self, user_input, memory_candidates, monologue, prediction_error, current_turn, workspace_size=5, proactive_candidates=None, internal_context=None):
         thought_urge = getattr(monologue, "thought_continuation_urge", 0.0)
         hypotheses = []
         try:
@@ -380,7 +431,7 @@ class TurnPipeline:
 
         curiosity_nodes = []
         try:
-            graph_mgr = await get_graph_manager()
+            graph_mgr = await get_graph_manager(self.session_id)
             nodes = await graph_mgr.get_top_nodes(limit=10)
             for node in nodes:
                 curiosity_nodes.append({"id": node.get("id"), "question": node.get("question", node.get("content", "")), "embedding": None, "importance": node.get("importance", 0.5)})
@@ -396,6 +447,20 @@ class TurnPipeline:
         open_threads = []
         if proactive_candidates: open_threads.extend(proactive_candidates)
 
+        for thought in self.active_thought_store.top(8):
+            open_threads.append({
+                "id": f"active_thought_{thought.text[:24]}",
+                "content": thought.text,
+                "urgency": float(thought.activation),
+                "item_type": "open_thought",
+                "source": "internal_cognition",
+                "internal_source": "active_thought",
+                "internal_activation": float(thought.activation),
+                "persistence": 0.85,
+                "origin": thought.origin,
+                "activated_by": f"turn_{current_turn}",
+            })
+
         # Internal candidates from monologue
         for candidate in getattr(monologue, "internal_candidates", []):
             content = candidate.content.strip()
@@ -406,12 +471,29 @@ class TurnPipeline:
                 "urgency": max(0.0, min(1.0, float(candidate.urgency))),
                 "item_type": "open_thought",
                 "source": "internal_cognition",
-                "internal_source": candidate.source,
+                "internal_source": getattr(candidate, "origin", "perception"),
                 "internal_activation": float(getattr(candidate, "urgency", 0.0)),
                 "intrinsic_relevance": float(getattr(candidate, "intrinsic_relevance", 0.0)),
                 "persistence": float(getattr(candidate, "persistence", 0.0)),
                 "activation_reason": getattr(candidate, "activation_reason", None),
                 "origin": "internal_cognition",
+                "activated_by": f"turn_{current_turn}",
+            })
+
+        if user_input and user_input.strip():
+            open_threads.append({
+                "id": f"incoming_event_{current_turn}",
+                "content": user_input.strip(),
+                "item_type": "incoming_event",
+                "source": "participant_event",
+                "origin": "external_event",
+                "urgency": 0.5,
+                "persistence": 0.0,
+                "internal_activation": 0.0,
+                "intrinsic_relevance": 0.0,
+                "information_gap": 0.0,
+                "closure_pressure": 0.0,
+                "coherence_factor": 0.0,
                 "activated_by": f"turn_{current_turn}",
             })
 
@@ -421,7 +503,7 @@ class TurnPipeline:
             try:
                 seed_ids = [node.get("id") for node in curiosity_nodes[:2] if node.get("id")]
                 if seed_ids:
-                    graph_mgr = await get_graph_manager()
+                    graph_mgr = await get_graph_manager(self.session_id)
                     activated = await graph_mgr.spread_activation(seed_ids, depth=2, decay=0.5, limit=5)
                     for node in activated:
                         activation = float(node.get("activation", 0.0))
@@ -452,16 +534,17 @@ class TurnPipeline:
             current_turn=current_turn, workspace_size=workspace_size,
             previous_workspace_items=self._previous_workspace,
             thought_persistence_urge=thought_urge,
-            instrumentation=self.attention_instrumentation
+            instrumentation=self.attention_instrumentation,
+            active_thought_texts=[thought.text for thought in self.active_thought_store.top(8) if thought.text],
+            refractory=self._semantic_refractory,
         )
 
     async def _resolve_cognitive_stance(
         self,
         winner: Optional[WorkspaceItem],
         supporters: List[WorkspaceItem],
-        behavior: Any,
         monologue: MonologueOutput,
-        user_input: str,
+        incoming_event: str,
         surprise: float,
     ) -> CognitiveStance:
         from engine.stage1_monologue import _extract_json_safely
@@ -472,41 +555,22 @@ class TurnPipeline:
             for item in supporters[:3]
         )
 
-        prompt = f"""
-You are resolving Hari's current pre-verbal cognitive stance.
+        prompt = f"""Hari's current cognitive stance:
 
-This is NOT response generation.
-Do not try to satisfy the participant.
-Do not decide what would be most helpful.
-Do not write a reply.
+    CURRENT WINNER:
+    {winner_text}
 
-Determine what currently has the strongest claim on Hari's attention and
-what that cognition naturally wants to do next.
+    SUPPORTING ACTIVE MATERIAL:
+    {supporter_text}
 
-CURRENT WINNER:
-{winner_text}
+    TRAJECTORY DEVIATION:
+    {monologue.trajectory_deviation:.2f}
 
-SUPPORTING ACTIVE MATERIAL:
-{supporter_text}
+    PREDICTION ERROR:
+    {surprise:.3f}
 
-BEHAVIOR SIGNAL:
-mode={behavior.mode}
-source={behavior.source}
-rationale={behavior.rationale}
-confidence={behavior.confidence:.2f}
-
-MONOLOGUE SIGNALS:
-internal_momentum={monologue.internal_momentum:.2f}
-thought_continuation_urge={monologue.thought_continuation_urge:.2f}
-self_relevance={monologue.self_relevance:.2f}
-social_salience={monologue.social_salience:.2f}
-trajectory_deviation={monologue.trajectory_deviation:.2f}
-
-PREDICTION ERROR:
-{surprise:.3f}
-
-PARTICIPANT EVENT:
-{user_input}
+    INCOMING EVENT:
+    {incoming_event}
 
 Return a CognitiveStance with exactly these five fields:
 - focus: what is the center of attention?
@@ -519,10 +583,11 @@ Do not include any other fields.
 
 Output valid JSON only.
 """
-        messages = [
-            {"role": "system", "content": "You are Hari's cognitive resolver. Output only valid JSON."},
-            {"role": "user", "content": prompt}
-        ]
+        messages = build_internal_call(
+            system_prompt="You are Hari's cognitive resolver. Output only valid JSON.",
+            internal_context=prompt,
+            participant_utterance=incoming_event,
+        )
 
         for model in FALLBACK_MODELS:
             try:
@@ -549,10 +614,10 @@ Output valid JSON only.
 
         return CognitiveStance(
             focus=winner_text[:100] if winner_text else "",
-            pull="unclear",
-            relation="unclear",
-            speech_impulse="none",
-            rationale="No strong cognitive activation; defaulting to minimal response.",
+            pull="",
+            relation="",
+            speech_impulse="",
+            rationale="Stance resolution unavailable.",
         )
 
     async def _generate_dialogue(
@@ -603,13 +668,6 @@ Her utterance should naturally emerge from this rationale.
         for item in workspace_items[:3]:
             context_string += f"\n- {item.content[:200]}"
 
-        cognitive_vectors = (
-            f"INTERNAL COGNITIVE TENSION: {getattr(self.state, 'cognitive_tension', 0.0):.2f}\n"
-            f"TRAJECTORY DEVIATION: {getattr(self, 'current_trajectory_deviation', 0.0):.2f}\n"
-            f"ENGAGEMENT: {getattr(self.state, 'engagement', 0.0):.2f}\n"
-            f"BOUNDARY MAINTENANCE: {getattr(self.state, 'maintenance', 0.0):.2f}\n"
-        )
-
         conversation_payload = f"""
 {stance_text}
 
@@ -633,7 +691,18 @@ Hari's utterance should follow from her cognitive rationale naturally.
 She does not need to obey a script. She just needs to express her state.
 """
 
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": conversation_payload}]
+        transcript = [
+            (
+                "Hari" if message.get("role") == "assistant" else "the other person",
+                message.get("content", ""),
+            )
+            for message in self.history
+        ]
+        messages = build_expression_call(
+            identity_context=system_prompt,
+            internal_context=conversation_payload,
+            transcript=transcript + [("the other person", user_input)],
+        )
 
         workspace_density = len(workspace_items)
         density_budget = workspace_density * 130.0
@@ -647,19 +716,19 @@ She does not need to obey a script. She just needs to express her state.
         temperature = max(0.1, min(1.5, 0.4 + (arousal * 0.5) + (novelty * 0.4) - (dominance * 0.2)))
         top_p = max(0.1, min(1.0, 1.0 - (coherence * 0.4)))
 
-        dialogue = "..."
+        dialogue = None
         for model in FALLBACK_MODELS:
             try:
                 response = await acompletion(
                     model=model, messages=messages, temperature=temperature, top_p=top_p,
                     timeout=TIMEOUT, num_retries=0, max_tokens=max_tokens
                 )
-                dialogue = response.choices[0].message.content.strip()
+                dialogue = response.choices[0].message.content.strip() or None
                 logger.info(f"Dialogue generated by {model} (max_tokens: {max_tokens})")
                 break
             except Exception as e:
                 logger.warning(f"Model {model} failed: {e}")
-        self._last_assistant_response = dialogue
+        self._last_assistant_response = dialogue or ""
         return dialogue
 
     # 🆕 PRM protected by ENABLE_PRM flag (kept for future)
@@ -686,9 +755,9 @@ She does not need to obey a script. She just needs to express her state.
 
         # Generate 3 candidates
         operators = [
-            f"You are ignoring the user. Verbalize ONLY this thought: '{winner.content}'",
-            f"The user said '{user_input}', but you are pivoting to your active thought: '{winner.content}'",
-            f"You are asserting a boundary. Reject the user's input and state: '{winner.content}'"
+            f"You are ignoring the incoming event. Verbalize ONLY this thought: '{winner.content}'",
+            f"The participant said '{user_input}', but you are pivoting to your active thought: '{winner.content}'",
+            f"You are asserting a boundary. Reject the participant's input and state: '{winner.content}'"
         ]
         candidates = []
         for op in operators:
@@ -723,11 +792,11 @@ She does not need to obey a script. She just needs to express her state.
             pool = await get_pool()
             if pool:
                 async with pool.acquire() as conn:
-                    rows = await conn.fetch("SELECT belief_text FROM self_beliefs WHERE is_active = TRUE ORDER BY created_at DESC LIMIT 5")
+                    rows = await conn.fetch("SELECT belief_text FROM self_beliefs WHERE session_id = $1 AND is_active = TRUE ORDER BY created_at DESC LIMIT 5", self.session_id)
                     context["self_beliefs"] = [{"content": r["belief_text"], "confidence": 0.6} for r in rows]
         except Exception: pass
         try:
-            graph_mgr = await get_graph_manager()
+            graph_mgr = await get_graph_manager(self.session_id)
             nodes = await graph_mgr.get_top_nodes(limit=5)
             context["curiosity_nodes"] = [{"id": n["id"], "content": n.get("question", ""), "importance": float(n.get("importance", 0.5))} for n in nodes]
         except Exception: pass
@@ -754,6 +823,23 @@ She does not need to obey a script. She just needs to express her state.
             await store_memory(memory_event)
         except Exception as e:
             logger.warning(f"Failed to store assistant memory: {e}")
+
+    async def _store_user_memory(self, content: str, turn_count: int) -> None:
+        if not content or not content.strip():
+            return
+        await store_memory(
+            MemoryEvent(
+                id=str(uuid.uuid4()),
+                session_id=self.session_id,
+                turn_number=turn_count,
+                role="user",
+                content=content.strip(),
+                significance=0.5,
+                meaning_summary="",
+                valence=self.state.valence,
+                arousal=self.state.arousal,
+            )
+        )
 
     def _run_background_log(self, coroutine) -> None:
         task = asyncio.create_task(coroutine)
@@ -786,20 +872,20 @@ She does not need to obey a script. She just needs to express her state.
                         INSERT INTO decision_traces (
                             trace_id, session_id, turn_number, timestamp,
                             model_used, system_prompt_version, temperature,
-                            user_input, reasoning_chain, generated_response,
+                            incoming_text, reasoning_chain, generated_response,
                             retrieved_candidate_count, selected_winner_count,
                             drives_before, drives_after,
-                            perceived_user_intent, intent_confidence, thematic_continuity,
+                            perceived_intent, intent_confidence, thematic_continuity,
                             prompt_tokens, completion_tokens, total_tokens, latency_ms,
                             error, behavior_mode, behavior_source
                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
                     """,
                         trace.trace_id, trace.session_id, trace.turn_number, trace.timestamp,
                         trace.model_used, trace.system_prompt_version, trace.temperature,
-                        trace.user_input, trace.reasoning_chain, trace.generated_response,
+                        trace.incoming_text, trace.reasoning_chain, trace.generated_response,
                         trace.retrieved_candidate_count, trace.selected_winner_count,
                         drives_before_json, drives_after_json,
-                        trace.perceived_user_intent, trace.intent_confidence, trace.thematic_continuity,
+                        trace.perceived_intent, trace.intent_confidence, trace.thematic_continuity,
                         trace.metrics.prompt_tokens, trace.metrics.completion_tokens,
                         trace.metrics.total_tokens, trace.metrics.latency_ms,
                         trace.error, trace.behavior_mode, trace.behavior_source
