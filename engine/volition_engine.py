@@ -157,15 +157,10 @@ class VolitionEngine:
         return internal[0] if internal else None
 
     async def get_proactive_candidates(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Converts desires to actual workspace candidates with full metadata.
-        This is where volition becomes ACTION.
-        """
         candidates = []
         for desire in self._current_turn_desires:
             if desire.base_tension <= 0.1:
                 continue
-            # A desire without a cognitive target does NOT become a thought.
             if not desire.target_content:
                 continue
             candidates.append({
@@ -185,8 +180,6 @@ class VolitionEngine:
                 "coherence_factor": desire.base_tension * 0.3,
             })
         self._current_turn_desires.clear()
-        if candidates:
-            logger.info(f"Volition generated {len(candidates)} proactive candidates")
         return candidates
 
     def add_desire(self, desire: Desire) -> None:
