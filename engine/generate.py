@@ -83,6 +83,7 @@ class TurnPipeline:
         self._last_homeostatic_reward = 0.0
         self.active_thought_store = ActiveThoughtStore()
         self._recent_winner_contents: List[str] = []
+        self._turn_counter = 0
         from engine.semantic_refractory import SemanticRefractory
         self._semantic_refractory = SemanticRefractory(
             refractory_turns=cfg.REFRACTORY_TURNS,

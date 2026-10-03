@@ -116,6 +116,11 @@ async def run_observatory():
     state = HariState()
     grace = GraceTracker()
     pipeline = TurnPipeline(session_id, state, grace)
+    
+    from engine.tick import TickRunner
+    tick_runner = TickRunner(pipeline, interval_seconds=30.0, min_pressure=0.55)
+    tick_runner.start()
+
     from engine.consolidation_worker import get_manager
     consolidation_manager = get_manager()
     await consolidation_manager.start(session_id)
@@ -133,7 +138,7 @@ async def run_observatory():
         
         result = await pipeline.execute(user_input, turn_count)
         consolidation_manager.update_turn(turn_count)
-        dialogue = result["dialogue"] or ""
+        dialogue = result.get("dialogue") or ""
         print(f"Hari: {dialogue if dialogue else '(silence)'}")
         
         # EXPANDED COGNITIVE TELEMETRY
@@ -167,13 +172,14 @@ async def run_observatory():
         
         await asyncio.sleep(10)  # rate‑limit guard
         
-        if "goodbye" in user_input.lower() or "goodbye" in dialogue.lower():
+        if "goodbye" in user_input.lower() or (dialogue and "goodbye" in dialogue.lower()):
             print("Conversation ended naturally.")
             break
             
-        user_input = user_sim.get_next_message(dialogue)
+        user_input = user_sim.get_next_message(dialogue or "")
 
     # End session
+    await tick_runner.stop()
     await consolidation_manager.stop()
     pipeline._event_logger.log_session_end()
     
