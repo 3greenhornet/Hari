@@ -40,6 +40,8 @@ from engine import config as cfg
 from engine.prompting import build_internal_call, build_expression_call
 from psyche.active_thoughts import ActiveThoughtStore
 from engine.pursuits import PursuitRegistry
+from engine.endogenous import collect_endogenous_candidates
+from engine.quarantine import is_contaminated
 
 # ---------- Environment Flags ----------
 ENABLE_PRM = os.getenv("ENABLE_PRM", "False").lower() == "true"
@@ -130,6 +132,8 @@ class TurnPipeline:
             self.active_thought_store.decay_all(connectivity_map)
         except Exception:
             self.active_thought_store.decay_all()
+        
+        await self._surface_recent_contradictions(turn_count)
 
         # Memory retrieval uses ONLY the external event; inertia is handled separately.
         blended_query = user_input
@@ -205,6 +209,25 @@ class TurnPipeline:
             identity_context=identity_context,
             is_tick=is_tick
         )
+        
+        contamination_hits = 0
+        if monologue_output.internal_candidates:
+            filtered = []
+            for candidate in monologue_output.internal_candidates:
+                contaminated, matches = is_contaminated(candidate.content)
+                if contaminated:
+                    contamination_hits += 1
+                    self._event_logger.log_contamination(
+                        stage="monologue_internal",
+                        content=candidate.content,
+                        matches=matches,
+                    )
+                    if cfg.STERILE_MODE:
+                        continue
+                filtered.append(candidate)
+            monologue_output.internal_candidates = filtered
+        self._current_contamination_hits = contamination_hits
+
         if not monologue_output.observations and not monologue_output.internal_candidates:
             self._event_logger.log_substrate_fault(reason="empty_monologue_output")
         if monologue_output.internal_candidates:
@@ -327,6 +350,12 @@ class TurnPipeline:
 
         # 15. Behavior Decision (Observability)
         behavior = select_behavior(workspace_items[0] if workspace_items else None, self.state)
+        
+        if cfg.ENABLE_REFLEXION and surprise > 0.7:
+            try:
+                self._reflexion_controller.process_prediction_failure(self.state, surprise)
+            except Exception as e:
+                logger.debug("Reflexion failed: %s", e)
 
         # --- Resolve Cognitive Stance ---
         stance = await self._resolve_cognitive_stance(
@@ -354,6 +383,7 @@ class TurnPipeline:
             behavior_mode=behavior.mode,
             behavior_source=behavior.source
         )
+        trace.contamination_hits = getattr(self, "_current_contamination_hits", 0)
         candidate_scores = telemetry.get("candidate_scores", []) if telemetry else []
         selected_indices = telemetry.get("selected_indices", []) if telemetry else []
         for idx, cand in enumerate(candidate_scores):
@@ -550,38 +580,17 @@ class TurnPipeline:
         open_threads = []
         if proactive_candidates: open_threads.extend(proactive_candidates)
 
-        for thought in self.active_thought_store.top(8):
-            open_threads.append({
-                "id": f"active_thought_{thought.text[:24]}",
-                "content": thought.text,
-                "urgency": float(thought.activation),
-                "item_type": "open_thought",
-                "source": "internal_cognition",
-                "internal_source": "active_thought",
-                "internal_activation": float(thought.activation),
-                "persistence": 0.85,
-                "origin": thought.origin,
-                "activated_by": f"turn_{current_turn}",
-            })
-
-        # Internal candidates from monologue
-        for candidate in getattr(monologue, "internal_candidates", []):
-            content = candidate.content.strip()
-            if not content: continue
-            open_threads.append({
-                "id": f"internal_{uuid.uuid4()}",
-                "content": content,
-                "urgency": max(0.0, min(1.0, float(candidate.urgency))),
-                "item_type": "open_thought",
-                "source": "internal_cognition",
-                "internal_source": getattr(candidate, "origin", "perception"),
-                "internal_activation": float(getattr(candidate, "urgency", 0.0)),
-                "intrinsic_relevance": float(getattr(candidate, "intrinsic_relevance", 0.0)),
-                "persistence": float(getattr(candidate, "persistence", 0.0)),
-                "activation_reason": getattr(candidate, "activation_reason", None),
-                "origin": "internal_cognition",
-                "activated_by": f"turn_{current_turn}",
-            })
+        endogenous = collect_endogenous_candidates(
+            active_thought_store=self.active_thought_store,
+            curiosity_nodes=curiosity_nodes,
+            active_threads=self._active_threads,
+            self_beliefs=internal_context.get("self_beliefs", []),
+            pursuit_registry=getattr(self, "pursuit_registry", None),
+            contradictions=internal_context.get("contradictions", []),
+            self_model=self.identity_model.self_model if self.identity_model else None,
+            current_turn=current_turn,
+        )
+        open_threads.extend(endogenous)
 
         if external_event and external_event.strip() and not is_tick:
             open_threads.append({
@@ -599,36 +608,6 @@ class TurnPipeline:
                 "coherence_factor": 0.0,
                 "activated_by": f"turn_{current_turn}",
             })
-
-        # 🆕 Spreading Activation (Curiosity-gated)
-        springboard_candidates = []
-        if self.state.curiosity > 0.5 and curiosity_nodes:
-            try:
-                seed_ids = [node.get("id") for node in curiosity_nodes[:2] if node.get("id")]
-                if seed_ids:
-                    graph_mgr = await get_graph_manager(self.session_id)
-                    activated = await graph_mgr.spread_activation(seed_ids, depth=2, decay=0.5, limit=5)
-                    for node in activated:
-                        activation = float(node.get("activation", 0.0))
-                        if activation <= 0.0: continue
-                        springboard_candidates.append({
-                            "id": f"springboard_{node['id']}_{current_turn}",
-                            "content": node["question"],
-                            "urgency": activation * 1.5,
-                            "item_type": "open_thought",
-                            "source": "curiosity_spreading",
-                            "internal_source": "springboard",
-                            "internal_activation": activation,
-                            "intrinsic_relevance": activation * 1.5,
-                            "origin": "curiosity_spreading",
-                            "activated_by": f"turn_{current_turn}",
-                            "information_gap": activation,
-                            "closure_pressure": 0.15 * activation,
-                            "coherence_factor": 0.25 * activation,
-                        })
-            except Exception as e:
-                logger.debug(f"Spreading activation failed: {e}")
-        open_threads.extend(springboard_candidates)
 
         graph_mgr = await get_graph_manager(self.session_id)
         return await settle_workspace(
@@ -652,6 +631,29 @@ class TurnPipeline:
             attention_config=self.attention_config,
             max_rounds=3,
         )
+
+    async def _surface_recent_contradictions(self, current_turn: int) -> None:
+        try:
+            from db.connection import get_pool
+            pool = await get_pool()
+            if not pool:
+                return
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT contradiction_id, belief_a, belief_b
+                    FROM contradictions
+                    WHERE session_id = $1 AND status = 'active'
+                      AND created_at > NOW() - INTERVAL '10 minutes'
+                    ORDER BY created_at DESC LIMIT 3
+                """, self.session_id)
+            for row in rows:
+                text = f"Tension: {row['belief_a'][:120]} vs {row['belief_b'][:120]}"
+                self.active_thought_store.upsert(
+                    text=text, activation=0.75, origin="contradiction",
+                    turn=current_turn, source_type="contradiction",
+                )
+        except Exception as e:
+            logger.debug("Contradiction surfacing failed: %s", e)
 
     async def _resolve_cognitive_stance(
         self,
