@@ -1,7 +1,7 @@
 """Persistent cognitive state across turns."""
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -110,10 +110,14 @@ class ActiveThoughtStore:
             promoted += 1
         return promoted
 
-    def decay_all(self) -> None:
-        """Apply geometric decay and drop thoughts below the floor."""
+    def decay_all(self, connectivity_map: Optional[Dict[str, float]] = None) -> None:
+        """Apply connectivity-modulated decay."""
+        connectivity_map = connectivity_map or {}
         for key, item in list(self._items.items()):
-            item.activation *= self.decay_rate
+            conn = float(connectivity_map.get(key, 0.0))
+            conn_factor = min(0.9, conn)
+            effective_decay = self.decay_rate + (1.0 - self.decay_rate) * conn_factor
+            item.activation *= effective_decay
             if item.activation < self.floor:
                 del self._items[key]
 
