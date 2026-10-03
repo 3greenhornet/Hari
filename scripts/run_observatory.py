@@ -109,14 +109,16 @@ async def run_observatory():
 
     # Reinitialize the curiosity graph in memory so it drops the old 91 nodes
     from engine.curiosity_graph import get_graph_manager
-    graph_mgr = await get_graph_manager()
-    await graph_mgr.initialize()
-    print("🧠 Curiosity graph reinitialized (0 nodes).")
+    graph_mgr = await get_graph_manager(session_id)
+    print(f"🧠 Curiosity graph initialized for {session_id}.")
     # =====================================================================
 
     state = HariState()
     grace = GraceTracker()
     pipeline = TurnPipeline(session_id, state, grace)
+    from engine.consolidation_worker import get_manager
+    consolidation_manager = get_manager()
+    await consolidation_manager.start(session_id)
     user_sim = SimulatedUser()
     
     print(f"Running dynamic baseline session: {session_id}")
@@ -130,11 +132,9 @@ async def run_observatory():
         print(f"User: {user_input}")
         
         result = await pipeline.execute(user_input, turn_count)
-        from engine.consolidation_worker import get_manager
-        consolidation_manager = get_manager()
         consolidation_manager.update_turn(turn_count)
-        dialogue = result["dialogue"]
-        print(f"Hari: {dialogue}")
+        dialogue = result["dialogue"] or ""
+        print(f"Hari: {dialogue if dialogue else '(silence)'}")
         
         # EXPANDED COGNITIVE TELEMETRY
         workspace = result.get("workspace_items", [])
@@ -174,6 +174,7 @@ async def run_observatory():
         user_input = user_sim.get_next_message(dialogue)
 
     # End session
+    await consolidation_manager.stop()
     pipeline._event_logger.log_session_end()
     
     # Run analysis
