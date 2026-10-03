@@ -220,6 +220,7 @@ async def run_monologue(
     identity_context: Optional[str] = None,
     active_thoughts_block: Optional[str] = None,
     relationship_summary: str = "",
+    is_tick: bool = False,
 ) -> MonologueOutput:
     """
     Sensory monologue extraction engine.
@@ -236,12 +237,32 @@ async def run_monologue(
                 parts.append(f"- {thread.get('title', '')}: {thread.get('description', '')[:100]}")
         active_thoughts_block = "\n".join(parts) if parts else "(nothing yet)"
 
-    prompt = _build_sensory_prompt(
-        incoming_event=user_input,
-        active_thoughts_block=active_thoughts_block,
-        memory_block=_format_memories(recent_memories),
-        relationship_summary=relationship_summary,
-    )
+    if is_tick:
+        prompt = f"""Hari's mind in the absence of an incoming event.
+
+CURRENTLY ACTIVE THOUGHTS:
+{active_thoughts_block or "(nothing yet)"}
+
+RECENT MEMORIES:
+{_format_memories(recent_memories)}
+
+CURRENT COGNITIVE STATE:
+{state.to_prompt_context()}
+
+No one has spoken. This is her mind continuing.
+Report what, if anything, becomes cognitively active on its own.
+An empty internal_candidates list is valid.
+
+Return ONLY JSON with observations, questions, ambiguities,
+internal_candidates, curiosity_trigger, trajectory_deviation.
+"""
+    else:
+        prompt = _build_sensory_prompt(
+            incoming_event=user_input,
+            active_thoughts_block=active_thoughts_block,
+            memory_block=_format_memories(recent_memories),
+            relationship_summary=relationship_summary,
+        )
 
     from engine.prompting import build_internal_call
     messages = build_internal_call(

@@ -420,15 +420,17 @@ class TurnPipeline:
         self._event_logger.log_decision_trace(trace_id)
 
         # 19. Update History & Store Memory (WITH VAD)
-        self.history.append({"role": "user", "content": user_input})
+        if not is_tick:
+            self.history.append({"role": "user", "content": user_input})
         if dialogue is not None:
             self.history.append({"role": "assistant", "content": dialogue})
         if len(self.history) > 10: self.history = self.history[-10:]
 
-        try:
-            await self._store_user_memory(user_input, turn_count)
-        except Exception as error:
-            logger.warning(f"Failed to store user memory: {error}")
+        if not is_tick:
+            try:
+                await self._store_user_memory(user_input, turn_count)
+            except Exception as error:
+                logger.warning(f"Failed to store user memory: {error}")
         if dialogue is not None:
             significance = max(
                 0.3,
@@ -540,7 +542,7 @@ class TurnPipeline:
                 "activated_by": f"turn_{current_turn}",
             })
 
-        if external_event and external_event.strip():
+        if external_event and external_event.strip() and not is_tick:
             open_threads.append({
                 "id": f"incoming_event_{current_turn}",
                 "content": external_event.strip(),
