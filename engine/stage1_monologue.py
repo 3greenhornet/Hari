@@ -15,75 +15,13 @@ litellm.num_retries = 2
 from typing import List, Optional, Any, Dict
 
 
-def _normalize_hypothesis_proposal(raw: dict) -> Optional[dict]:
-    if not isinstance(raw, dict):
-        return None
-    if raw.get("statement"):
-        return raw
-    if raw.get("hypothesis"):
-        return {
-            "type": "other",
-            "statement": raw["hypothesis"],
-            "confidence": raw.get("confidence", 0.5),
-            "information_gap": raw.get("information_gap", 0.3),
-            "closure_pressure": raw.get("closure_pressure", 0.3),
-            "coherence_factor": raw.get("coherence_factor", 0.3),
-        }
-    if raw.get("content"):
-        return {
-            "type": "other",
-            "statement": raw["content"],
-            "confidence": raw.get("confidence", 0.5),
-            "information_gap": raw.get("information_gap", 0.3),
-            "closure_pressure": raw.get("closure_pressure", 0.3),
-            "coherence_factor": raw.get("coherence_factor", 0.3),
-        }
-    return None
-
-
-def _normalize_self_belief_proposal(raw: dict) -> Optional[dict]:
-    if not isinstance(raw, dict):
-        return None
-    if raw.get("belief_text"):
-        return raw
-    if raw.get("belief"):
-        return {
-            "belief_text": raw["belief"],
-            "confidence": raw.get("confidence", 0.5),
-            "information_gap": raw.get("information_gap", 0.3),
-            "closure_pressure": raw.get("closure_pressure", 0.3),
-            "coherence_factor": raw.get("coherence_factor", 0.3),
-        }
-    if raw.get("content"):
-        return {
-            "belief_text": raw["content"],
-            "confidence": raw.get("confidence", 0.5),
-            "information_gap": raw.get("information_gap", 0.3),
-            "closure_pressure": raw.get("closure_pressure", 0.3),
-            "coherence_factor": raw.get("coherence_factor", 0.3),
-        }
-    return None
-
-
 def _map_to_monologue_schema(raw: dict) -> dict:
     mapped = {}
     if not isinstance(raw, dict):
         return mapped
-    if isinstance(raw.get("hypothesis_proposal"), dict):
-        norm = _normalize_hypothesis_proposal(raw["hypothesis_proposal"])
-        if norm:
-            mapped["hypothesis_proposal"] = norm
-    if isinstance(raw.get("self_belief_proposal"), dict):
-        norm = _normalize_self_belief_proposal(raw["self_belief_proposal"])
-        if norm:
-            mapped["self_belief_proposal"] = norm
     for key in [
-        "thematic_continuity", "interruption_severity", "observations", "questions",
-        "ambiguities", "internal_candidates",
-        "thought_continuation_urge", "internal_momentum", "self_relevance",
-        "social_salience", "trajectory_deviation", "trajectory_confidence",
-        "curiosity_trigger", "triggered_memory_summary", "memory_significance",
-        "memory_emotional_tone", "referenced_thread_id"
+        "observations", "questions", "ambiguities", "internal_candidates",
+        "curiosity_trigger", "trajectory_deviation",
     ]:
         if key in raw:
             mapped[key] = raw[key]
@@ -162,6 +100,28 @@ def _format_memories(memories: List) -> str:
 
 
 def _build_sensory_prompt(
+    incoming_event: str,
+    active_thoughts_block: str,
+    memory_block: str,
+    relationship_summary: str = "",
+) -> str:
+    rel_line = f"With this person: {relationship_summary}\n" if relationship_summary else ""
+    return f"""Hari's mind, currently holding:
+{active_thoughts_block}
+
+{memory_block}
+
+{rel_line}Just now they said:
+\"{incoming_event}\"
+
+This is her mind updating in the moment someone spoke.
+Return updates as they occur, each with content, origin, urgency, and persistence.
+Also return observations, questions, ambiguities, and trajectory_deviation where genuinely applicable.
+Return [] if nothing registers.
+Plain language only. Do not return analytical vocabulary or a reply.
+"""
+
+def _legacy_build_sensory_prompt(
     user_input: str,
     state: HariState,
     recent_memories: List,
@@ -240,34 +200,13 @@ def _default_sensory_output(
     prediction_error: float = 0.5,
     state: Optional[HariState] = None,
 ) -> MonologueOutput:
-    internal_momentum = 0.0
-    if state is not None:
-        internal_momentum = max(
-            getattr(state, "curiosity", 0.0),
-            getattr(state, "completion", 0.0),
-            getattr(state, "momentum", 0.0),
-        )
-
     return MonologueOutput(
-        thematic_continuity=max(0.0, 1.0 - prediction_error),
-        interruption_severity=prediction_error,
         observations=[],
         questions=[],
         ambiguities=[],
         internal_candidates=[],
         curiosity_trigger=None,
-        hypothesis_proposal=None,
-        self_belief_proposal=None,
-        triggered_memory_summary=None,
-        memory_significance=0.5,
-        memory_emotional_tone="neutral",
         trajectory_deviation=prediction_error,
-        trajectory_confidence=0.2,
-        referenced_thread_id=None,
-        thought_continuation_urge=internal_momentum,
-        internal_momentum=internal_momentum,
-        self_relevance=0.0,
-        social_salience=0.0,
     )
 
 
@@ -279,36 +218,37 @@ async def run_monologue(
     active_thread_context: Optional[str] = None,
     internal_context: Optional[Dict[str, Any]] = None,
     identity_context: Optional[str] = None,
+    active_thoughts_block: Optional[str] = None,
+    relationship_summary: str = "",
 ) -> MonologueOutput:
     """
     Sensory monologue extraction engine.
     Uses unified LiteLLM cascades to handle provider outages and rate limits safely.
     """
+    if active_thoughts_block is None:
+        parts = []
+        if internal_context:
+            for belief in internal_context.get("self_beliefs", [])[:3]:
+                parts.append(f"- {belief.get('content', belief.get('belief_text', ''))[:150]}")
+            for curiosity in internal_context.get("curiosity_nodes", [])[:3]:
+                parts.append(f"- {curiosity.get('content', curiosity.get('question', ''))[:150]}")
+            for thread in internal_context.get("active_threads", [])[:2]:
+                parts.append(f"- {thread.get('title', '')}: {thread.get('description', '')[:100]}")
+        active_thoughts_block = "\n".join(parts) if parts else "(nothing yet)"
+
     prompt = _build_sensory_prompt(
-        user_input,
-        state,
-        recent_memories,
-        prediction_error,
-        active_thread_context,
-        internal_context,
-        identity_context,
+        incoming_event=user_input,
+        active_thoughts_block=active_thoughts_block,
+        memory_block=_format_memories(recent_memories),
+        relationship_summary=relationship_summary,
     )
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Hari's internal cognitive field. "
-                "Report what becomes cognitively active. "
-                "Do not solve the conversation. "
-                "Do not optimize a response. "
-                "Do not analyze the participant. "
-                "Do not generate a reply. "
-                "Return only the requested JSON."
-            )
-        },
-        {"role": "user", "content": prompt}
-    ]
+    from engine.prompting import build_internal_call
+    messages = build_internal_call(
+        system_prompt="You are Hari's internal cognitive field. Return only the requested JSON.",
+        internal_context=prompt,
+        participant_utterance=None,
+    )
 
     for model in MONOLOGUE_FALLBACK_MODELS:
         try:
