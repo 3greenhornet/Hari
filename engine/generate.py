@@ -17,7 +17,7 @@ from models.identity import IdentityModel
 from engine.projection.identity_renderer import build_system_prompt_from_identity
 from psyche.state import HariState
 from psyche.grace import GraceTracker
-from engine.memory import store_memory, embed
+from engine.memory import store_memory, embed, retrieve_multi_source
 from engine.prediction import compute_prediction_error
 from engine.attention import load_workspace, broadcast_feedback, WorkspaceItem, load_workspace_secured, settle_workspace
 from engine.stage1_monologue import run_monologue
@@ -39,6 +39,7 @@ from models.stance import CognitiveStance
 from engine import config as cfg
 from engine.prompting import build_internal_call, build_expression_call
 from psyche.active_thoughts import ActiveThoughtStore
+from engine.pursuits import PursuitRegistry
 
 # ---------- Environment Flags ----------
 ENABLE_PRM = os.getenv("ENABLE_PRM", "False").lower() == "true"
@@ -73,6 +74,7 @@ class TurnPipeline:
         self.generativity_estimator = get_estimator()
         self.identity_model = IdentityModel()
         self.volition_engine = VolitionEngine()
+        self.pursuit_registry = PursuitRegistry(self.session_id)
         self.narrative_manager = NarrativeManager(self.session_id)
         from engine.relational_manager import RelationalManager
         self.relational_manager = RelationalManager(user_id=session_id)
@@ -133,15 +135,38 @@ class TurnPipeline:
         blended_query = user_input
 
         # 4. Memory Retrieval
-        candidates = await load_workspace_secured(
-            external_event=blended_query,
+        active_thought_texts = [t.text for t in self.active_thought_store.top(5) if t.text]
+        active_questions = []
+        try:
+            graph_mgr = await get_graph_manager(self.session_id)
+            top_nodes = await graph_mgr.get_top_nodes(limit=5)
+            active_questions = [n.get("question", "") for n in top_nodes if n.get("question")]
+        except Exception:
+            pass
+        if hasattr(self, "identity_model") and self.identity_model:
+            try:
+                active_questions.extend(self.identity_model.self_model.active_self_questions[:3])
+            except Exception:
+                pass
+
+        candidates = await retrieve_multi_source(
             session_id=self.session_id,
             current_turn=turn_count,
-            state=self.state,
-            previous_workspace_items=self._previous_workspace if hasattr(self, "_previous_workspace") else None,
-            limit=35
+            event_text=user_input or "",
+            active_thought_texts=active_thought_texts,
+            active_question_texts=active_questions,
+            per_source_limit=cfg.RETRIEVAL_PER_SOURCE_LIMIT,
         )
-        self._event_logger.log_memory_retrieval(query=user_input, count=len(candidates))
+        if len(candidates) < 3 and not is_tick:
+            candidates = await load_workspace_secured(
+                user_input=user_input or "",
+                session_id=self.session_id,
+                current_turn=turn_count,
+                state=self.state,
+                previous_workspace_items=self._previous_workspace,
+                limit=35,
+            )
+        self._event_logger.log_memory_retrieval(query=user_input or "", count=len(candidates))
 
         # 5. Active Threads
         active_thread_context_str = None
@@ -216,10 +241,18 @@ class TurnPipeline:
         volition_context["active_threads"] = [{"id": t.id, "title": t.title, "description": t.description} for t in self._active_threads]
         volition_context["internal_candidates"] = [{"id": f"internal_{i}", "content": c.content, "urgency": c.urgency} for i, c in enumerate(monologue_output.internal_candidates)]
         
+        desires_for_pursuit = self.volition_engine.desires_snapshot()
         self.volition_engine.generate_desires_from_state(self.state, context=volition_context)
         proactive_candidates = await self.volition_engine.get_proactive_candidates(volition_context)
         if proactive_candidates:
             logger.info(f"Volition injected {len(proactive_candidates)} proactive candidates")
+        
+        try:
+            await self.pursuit_registry._ensure_loaded()
+            for d in desires_for_pursuit:
+                self.pursuit_registry.spawn_or_strengthen(d, turn_count)
+        except Exception as e:
+            logger.debug("Pursuit update failed: %s", e)
 
         # 11. Proposal formation is handled by consolidation, not Stage 1.
         if cfg.ENABLE_GRACE:
@@ -464,6 +497,14 @@ class TurnPipeline:
             )
         except Exception as error:
             logger.debug(f"Homeostatic reward failed: {error}")
+        
+        # 22. Pursuit Flush
+        try:
+            self.pursuit_registry.decay(turn_count)
+            await self.pursuit_registry.flush_updates()
+        except Exception as e:
+            logger.debug("Pursuit flush failed: %s", e)
+
         if hasattr(self, 'relational_manager'): self.relational_manager.apply_relational_decay()
         try: await self.narrative_manager.flush_updates()
         except Exception as e: logger.error(f"Failed to flush narrative updates: {e}")
