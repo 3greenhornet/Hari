@@ -96,15 +96,23 @@ class TurnPipeline:
         async with self._cycle_lock:
             return await self._execute_inner(external_event, turn_count, trace_id, seed)
 
-    async def _execute_inner(self, external_event: str, turn_count: int, trace_id: Optional[str] = None, seed="event") -> Dict[str, Any]:
-        # 1. Prediction Error
-        surprise = await compute_prediction_error(self._last_assistant_response, external_event)
+    async def _execute_inner(
+        self,
+        user_input: Optional[str],
+        turn_count: int,
+        trace_id: Optional[str] = None,
+        seed: str = "event",
+    ) -> Dict[str, Any]:
+        is_tick = seed == "tick" or not user_input or not user_input.strip()
+        user_input = (user_input or "").strip()
+        self._event_logger.set_turn(turn_count)
+        surprise = await compute_prediction_error(self._last_assistant_response, user_input)
+        if not is_tick:
+            self._event_logger.log_incoming_event(user_input)
         
         # Conversation-surprise is telemetry only; it must not mutate state
         # before workspace attention has selected what was attended.
         
-        self._event_logger.log_user_input(external_event)
-
         try:
             graph_mgr = await get_graph_manager(self.session_id)
             connectivity_map = {}
@@ -122,7 +130,7 @@ class TurnPipeline:
             self.active_thought_store.decay_all()
 
         # Memory retrieval uses ONLY the external event; inertia is handled separately.
-        blended_query = external_event
+        blended_query = user_input
 
         # 4. Memory Retrieval
         candidates = await load_workspace_secured(
@@ -133,7 +141,7 @@ class TurnPipeline:
             previous_workspace_items=self._previous_workspace if hasattr(self, "_previous_workspace") else None,
             limit=35
         )
-        self._event_logger.log_memory_retrieval(query=external_event, count=len(candidates))
+        self._event_logger.log_memory_retrieval(query=user_input, count=len(candidates))
 
         # 5. Active Threads
         active_thread_context_str = None
@@ -166,10 +174,11 @@ class TurnPipeline:
 
         # 8. Monologue
         monologue_output = await run_monologue(
-            external_event, self.state, candidates, prediction_error=surprise,
+            user_input, self.state, candidates, prediction_error=surprise,
             active_thread_context=active_thread_context_str,
             internal_context=internal_context,
-            identity_context=identity_context
+            identity_context=identity_context,
+            is_tick=is_tick
         )
         if not monologue_output.observations and not monologue_output.internal_candidates:
             self._event_logger.log_substrate_fault(reason="empty_monologue_output")
@@ -218,13 +227,14 @@ class TurnPipeline:
 
         # 12. Workspace Allocation
         workspace_items, telemetry = await self._allocate_workspace(
-            external_event,
+            user_input,
             candidates,
             monologue_output,
             surprise,
             turn_count,
             proactive_candidates=proactive_candidates,
             internal_context=internal_context,
+            is_tick=is_tick
         )
         
         # Track winner for stagnation detection
@@ -269,7 +279,7 @@ class TurnPipeline:
         if event_attended:
             try:
                 await interpret_turn_and_update_state(
-                    user_input=external_event,
+                    user_input=user_input,
                     state=self.state,
                     monologue_output=monologue_output,
                     recent_history=self.history,
@@ -290,7 +300,7 @@ class TurnPipeline:
             winner=workspace_items[0] if workspace_items else None,
             supporters=workspace_items[1:4] if workspace_items else [],
             monologue=monologue_output,
-            external_event=external_event,
+            external_event=user_input,
             surprise=surprise,
         )
 
@@ -300,7 +310,7 @@ class TurnPipeline:
             session_id=self.session_id, turn_number=turn_count,
             model_used=getattr(monologue_output, "model_used", "gemini-2.5-flash"),
             temperature=telemetry.get("temperature", 0.5) if telemetry else 0.5,
-            incoming_text=external_event,
+            incoming_text=user_input,
             reasoning_chain=getattr(monologue_output, "raw_output", None),
             retrieved_candidate_count=len(telemetry.get("candidate_scores", [])),
             selected_winner_count=len(workspace_items),
@@ -365,12 +375,12 @@ class TurnPipeline:
 
             if ENABLE_PRM:
                 dialogue = await self._generate_dialogue_with_prm(
-                    workspace_items, external_event, turn_count, surprise, trace_id
+                    workspace_items, user_input, turn_count, surprise, trace_id
                 )
             else:
                 dialogue = await self._generate_dialogue(
                     workspace_items=workspace_items,
-                    external_event=external_event,
+                    external_event=user_input,
                     turn_count=turn_count,
                     surprise=surprise,
                     trace_id=trace_id,
@@ -395,7 +405,7 @@ class TurnPipeline:
         trace.generated_response = dialogue
         trace.drives_after = {k: getattr(self.state, k) for k in ["care","curiosity","maintenance","completion","coherence","rest","valence","arousal","dominance"]}
         winner_item = workspace_items[0] if workspace_items else None
-        trace.event_present = bool(external_event and external_event.strip())
+        trace.event_present = bool(user_input and user_input.strip())
         trace.event_was_winner = bool(winner_item and winner_item.item_type == "incoming_event")
         trace.event_was_supporting = event_attended
         trace.event_was_ignored = trace.event_present and not event_attended
@@ -410,13 +420,13 @@ class TurnPipeline:
         self._event_logger.log_decision_trace(trace_id)
 
         # 19. Update History & Store Memory (WITH VAD)
-        self.history.append({"role": "user", "content": external_event})
+        self.history.append({"role": "user", "content": user_input})
         if dialogue is not None:
             self.history.append({"role": "assistant", "content": dialogue})
         if len(self.history) > 10: self.history = self.history[-10:]
 
         try:
-            await self._store_user_memory(external_event, turn_count)
+            await self._store_user_memory(user_input, turn_count)
         except Exception as error:
             logger.warning(f"Failed to store user memory: {error}")
         if dialogue is not None:
@@ -467,7 +477,7 @@ class TurnPipeline:
             "behavior_mode": behavior.mode
         }
 
-    async def _allocate_workspace(self, external_event, memory_candidates, monologue, prediction_error, current_turn, workspace_size=5, proactive_candidates=None, internal_context=None):
+    async def _allocate_workspace(self, external_event, memory_candidates, monologue, prediction_error, current_turn, workspace_size=5, proactive_candidates=None, internal_context=None, is_tick=False):
         thought_urge = getattr(monologue, "thought_continuation_urge", 0.0)
         hypotheses = []
         try:
