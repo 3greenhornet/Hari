@@ -185,4 +185,25 @@ def collect_endogenous_candidates(
                 "coherence_factor": 0.4,
             })
 
+    if monologue_candidates:
+        for candidate in monologue_candidates[:max_per_source]:
+            content = (getattr(candidate, "content", "") or "").strip()
+            if not content:
+                continue
+            candidates.append({
+                "id": f"endogenous_monologue_{uuid.uuid4().hex[:8]}",
+                "content": content,
+                "item_type": "open_thought",
+                "source": "internal_cognition",
+                "internal_source": getattr(candidate, "origin", "monologue"),
+                "internal_activation": float(getattr(candidate, "urgency", 0.3)),
+                "intrinsic_relevance": float(getattr(candidate, "intrinsic_relevance", 0.0)),
+                "persistence": float(getattr(candidate, "persistence", 0.0)),
+                "origin": "internal_cognition",
+                "activated_by": f"monologue_turn_{current_turn}",
+                "activation_reason": getattr(candidate, "activation_reason", None),
+                "information_gap": 0.2,
+                "closure_pressure": 0.3,
+                "coherence_factor": 0.3,
+            })
     return candidates
