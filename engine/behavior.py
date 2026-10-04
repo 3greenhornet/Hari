@@ -1,3 +1,10 @@
+"""
+engine/behavior.py
+CAUSAL STATUS: TELEMETRY ONLY for Sprint 1.
+select_behavior() is logged to the decision trace and does not influence
+stance resolution, dialogue generation, or state.
+"""
+
 from typing import Optional
 
 from pydantic import BaseModel
@@ -30,7 +37,7 @@ def select_behavior(winner: Optional[WorkspaceItem], state: HariState) -> Behavi
             confidence=urgency,
         )
 
-    if source == "volition":
+    if source in ("volition", "volition_persistent"):
         internal_source = winner.payload.get("internal_source", "")
         if internal_source == "assert_boundary":
             return BehaviorDecision(
@@ -86,9 +93,9 @@ def select_behavior(winner: Optional[WorkspaceItem], state: HariState) -> Behavi
         )
 
     return BehaviorDecision(
-        mode="respond",
-        source="user_event",
+        mode="hold",
+        source=winner.payload.get("source") or "unknown",
         source_id=winner.source,
-        rationale="Default",
-        confidence=0.3,
+        rationale="No specific behavioral mode established.",
+        confidence=0.0,
     )
