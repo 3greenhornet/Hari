@@ -21,6 +21,7 @@ def collect_endogenous_candidates(
     pursuit_registry=None,
     contradictions: Optional[List[Dict[str, Any]]] = None,
     self_model: Any = None,
+    monologue_candidates=None,
     current_turn: int = 0,
     max_per_source: int = 6,
 ) -> List[Dict[str, Any]]:
