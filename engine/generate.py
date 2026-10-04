@@ -1,4 +1,4 @@
-﻿"""
+"""
 engine/generate.py — TurnPipeline: the cognitive loop.
 
 Orchestrates one turn: prediction → retrieval → monologue → volition →
