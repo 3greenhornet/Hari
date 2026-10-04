@@ -318,6 +318,16 @@ class TurnPipeline:
             self.grace_tracker.add_engagement_score(0.5)
 
         # 12. Workspace allocation
+        # Snapshot state immediately before workspace competition.
+        # This is the state that actually shapes salience, temperature,
+        # and softmax — distinct from drives_before (pre-volition) and
+        # drives_after (post-drift).
+        drives_during_workspace = {
+            k: getattr(self.state, k)
+            for k in ["care", "curiosity", "maintenance", "completion",
+                      "coherence", "rest", "valence", "arousal", "dominance",
+                      "cognitive_tension", "uncertainty", "social_ambiguity"]
+        }
         workspace_items, telemetry = await self._allocate_workspace(
             user_input,
             candidates,
@@ -598,6 +608,10 @@ class TurnPipeline:
             k: getattr(self.state, k)
             for k in ["care", "curiosity", "maintenance", "completion",
                       "coherence", "rest", "valence", "arousal", "dominance"]
+        }
+        trace.feedback_summary = {
+            **(trace.feedback_summary or {}),
+            "drives_during_workspace": drives_during_workspace,
         }
         trace.event_present = bool(user_input and user_input.strip())
         trace.event_was_winner = bool(winner_item and winner_item.item_type == "incoming_event")
