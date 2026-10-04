@@ -33,7 +33,7 @@ from engine.attention_config import AttentionCalibration
 from engine.attention_instrumentation import AttentionInstrumentation
 from engine.social_cognition import interpret_turn_and_update_state
 from engine.volition_engine import VolitionEngine
-from engine.behavior import select_behavior
+from engine.behavior import compute_action_affordances, select_action, BehaviorDecision
 from engine.reflexion_controller import ReflexionController
 from models.stance import CognitiveStance
 from engine import config as cfg
@@ -62,10 +62,13 @@ logger = logging.getLogger(__name__)
 
 
 class TurnPipeline:
-    def __init__(self, session_id: str, state: HariState, grace_tracker: GraceTracker):
+    def __init__(self, session_id: str, state: HariState,
+                 grace_tracker: Optional[Any] = None,
+                 participant_id: Optional[str] = None):
         self.session_id = session_id
         self.state = state
         self.grace_tracker = grace_tracker
+        self.participant_id = participant_id or session_id
         self.history: List[Dict[str, str]] = []
         self._last_assistant_response = ""
         self._background_tasks: Set[asyncio.Task] = set()
@@ -79,7 +82,7 @@ class TurnPipeline:
         self.pursuit_registry = PursuitRegistry(self.session_id)
         self.narrative_manager = NarrativeManager(self.session_id)
         from engine.relational_manager import RelationalManager
-        self.relational_manager = RelationalManager(user_id=session_id)
+        self.relational_manager = RelationalManager(user_id=self.participant_id)
         self._previous_workspace = []
         self._active_threads = []
         self.current_trajectory_deviation = 0.0
@@ -278,7 +281,7 @@ class TurnPipeline:
             logger.debug("Pursuit update failed: %s", e)
 
         # 11. Proposal formation is handled by consolidation, not Stage 1.
-        if cfg.ENABLE_GRACE:
+        if cfg.ENABLE_GRACE and self.grace_tracker:
             self.grace_tracker.add_engagement_score(0.5)
 
         # 12. Workspace Allocation
@@ -349,7 +352,32 @@ class TurnPipeline:
             logger.info("turn=%s event not attended; social cognition skipped", turn_count)
 
         # 15. Behavior Decision (Observability)
-        behavior = select_behavior(workspace_items[0] if workspace_items else None, self.state)
+        reciprocity = 0.5
+        if hasattr(self, "relational_manager") and self.relational_manager:
+            try:
+                reciprocity = float(self.relational_manager.relationship.reciprocity_score)
+            except Exception:
+                pass
+        internal_pressure = max(
+            float(self.state.curiosity), float(self.state.completion),
+            float(self.state.coherence), float(getattr(self.state, "cognitive_tension", 0.0)),
+        )
+        affordances = compute_action_affordances(
+            winner=workspace_items[0] if workspace_items else None,
+            supporters=workspace_items[1:4] if workspace_items else [],
+            state=self.state,
+            relationship=self.relational_manager.get_model() if hasattr(self, "relational_manager") else None,
+            reciprocity=reciprocity,
+            internal_pressure=internal_pressure,
+        )
+        chosen_action = select_action(affordances)
+        behavior = BehaviorDecision(
+            mode=chosen_action.action,
+            source="affordance",
+            source_id=workspace_items[0].source if workspace_items else None,
+            rationale=chosen_action.rationale,
+            confidence=chosen_action.strength,
+        )
         
         if cfg.ENABLE_REFLEXION and surprise > 0.7:
             try:
@@ -903,15 +931,13 @@ She does not need to obey a script. She just needs to express her state.
         return best_candidate
 
     async def _build_internal_associative_context(self, current_turn: int) -> dict:
-        context = {"self_beliefs": [], "curiosity_nodes": [], "active_threads": []}
+        context = {"self_beliefs": [], "curiosity_nodes": [], "active_threads": [], "contradictions": []}
         try:
-            from db.connection import get_pool
-            pool = await get_pool()
-            if pool:
-                async with pool.acquire() as conn:
-                    rows = await conn.fetch("SELECT belief_text FROM self_beliefs WHERE session_id = $1 AND is_active = TRUE ORDER BY created_at DESC LIMIT 5", self.session_id)
-                    context["self_beliefs"] = [{"content": r["belief_text"], "confidence": 0.6} for r in rows]
-        except Exception: pass
+            from engine.self_belief import SelfBeliefManager
+            beliefs_text = await SelfBeliefManager.get_active(self.session_id, limit=5)
+            context["self_beliefs"] = [{"content": b, "confidence": 0.6} for b in beliefs_text]
+        except Exception:
+            context["self_beliefs"] = []
         try:
             graph_mgr = await get_graph_manager(self.session_id)
             nodes = await graph_mgr.get_top_nodes(limit=5)
