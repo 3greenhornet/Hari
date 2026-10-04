@@ -352,6 +352,32 @@ class TurnPipeline:
             except Exception as error:
                 logger.debug(f"Refractory registration failed: {error}")
 
+        # Reinforce pursuits whose content matches a workspace winner.
+        try:
+            await self.pursuit_registry._ensure_loaded()
+            active_ids = {p.id for p in self.pursuit_registry.get_all_active()}
+            for item in workspace_items[:3]:
+                content = item.content
+                if not content or not content.strip():
+                    continue
+                match_id = self.pursuit_registry._find_similar_pursuit(content, None)
+                if match_id and match_id in active_ids:
+                    self.pursuit_registry.reinforce(
+                        match_id,
+                        turn_count,
+                        delta=self.pursuit_registry.reinforce_winner,
+                    )
+                    try:
+                        p = self.pursuit_registry._pursuits.get(match_id)
+                        if p:
+                            self._event_logger.log_pursuit_reinforced(
+                                match_id, p.content, p.strength, self.pursuit_registry.reinforce_winner
+                            )
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Pursuit reinforcement from winner failed: {e}")
+
         # 13. Mark narratives attended + update
         for item in workspace_items:
             if item.item_type == "narrative_thread":
