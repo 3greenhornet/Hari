@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 _tension_cache = {}          # (text_a_hash, text_b_hash) -> (tension_type, severity)
-_contradiction_history = {}  # key -> (last_check_time, severity)
+_contradiction_check_history: Dict[str, datetime] = {}
 
 # ============================================================
 # Helper: Tension Classification with LLM (Cached)
@@ -43,12 +43,6 @@ async def _evaluate_tension_llm(text_a: str, text_b: str) -> Tuple[str, float]:
     cache_key = f"{hash(text_a)}_{hash(text_b)}"
     if cache_key in _tension_cache:
         return _tension_cache[cache_key]
-
-    # Check if this pair was checked recently (within 1 hour)
-    if cache_key in _contradiction_history:
-        last_check, _ = _contradiction_history[cache_key]
-        if (datetime.now() - last_check).total_seconds() < 3600:
-            return _tension_cache.get(cache_key, ("neutral", 0.0))
 
     prompt = f"""Analyze the cognitive relationship between these two statements.
 Statement A: "{text_a[:300]}"
@@ -82,7 +76,6 @@ Output ONLY a JSON object with two fields:
                 tension_type = data.get("tension_type", "neutral")
                 severity = float(data.get("severity", 0.0))
                 _tension_cache[cache_key] = (tension_type, severity)
-                _contradiction_history[cache_key] = (datetime.now(), severity)
                 return tension_type, severity
             except Exception as e:
                 logger.warning(f"Failed to parse tension response from {model}: {e}")
@@ -184,7 +177,8 @@ async def promote_memory_to_pattern(
 
 async def promote_pattern_to_contradiction(
     pattern_id: str,
-    source_tension_id: Optional[str] = None
+    source_tension_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[str]:
     """
     Ticket 017: Check if a Pattern contradicts an existing Hypothesis.
@@ -234,7 +228,8 @@ async def promote_pattern_to_contradiction(
                 await promote_contradiction_to_curiosity(
                     contradiction_id,
                     source_tension_id or pattern_id,
-                    severity
+                    severity,
+                    session_id=session_id,
                 )
                 logger.info(f"Pattern-Hypothesis contradiction: {contradiction_id}")
                 return contradiction_id
@@ -243,21 +238,24 @@ async def promote_pattern_to_contradiction(
 async def promote_contradiction_to_curiosity(
     contradiction_id: str,
     source_tension_id: str,
-    severity: float = 0.5
+    severity: float = 0.5,
+    session_id: Optional[str] = None,
 ) -> Optional[str]:
     """Spawn a CuriosityNode from a contradiction."""
     if severity < PROMOTION.curiosity_importance_floor:
+        return None
+    if session_id is None:
+        logger.error("promote_contradiction_to_curiosity requires session_id")
         return None
 
     logger.info(f"Promoting contradiction {contradiction_id} -> curiosity (severity: {severity:.2f})")
     try:
         from engine.curiosity_graph import get_graph_manager
-        graph = await get_graph_manager()
+        graph = await get_graph_manager(session_id)
         importance = min(1.0, severity)
         node_id = await graph.add_node(
             question=f"Resolve tension: {contradiction_id}",
             importance=importance,
-            session_id="system",
             origin_trace_id=source_tension_id
         )
         pool = await get_pool()
@@ -275,7 +273,8 @@ async def promote_contradiction_to_curiosity(
 
 async def promote_curiosity_to_interest(
     curiosity_node_id: str,
-    source_tension_id: str
+    source_tension_id: str,
+    session_id: str,
 ) -> Optional[str]:
     """
     Ticket 018: Promote a frequently winning CuriosityNode to a persistent Interest.
@@ -283,7 +282,7 @@ async def promote_curiosity_to_interest(
     """
     logger.info(f"Promoting curiosity {curiosity_node_id} to interest")
     from engine.curiosity_graph import get_graph_manager
-    graph = await get_graph_manager()
+    graph = await get_graph_manager(session_id)
     nodes = await graph.get_top_nodes(limit=10)
     node_importance = 0.0
     for n in nodes:
@@ -293,7 +292,7 @@ async def promote_curiosity_to_interest(
     if node_importance < PROMOTION.interest_activation_threshold:
         return None
 
-    interest_id = f"interest_{curiosity_node_id}"
+    interest_id = f"interest_{session_id}_{curiosity_node_id}"
     pool = await get_pool()
     if pool:
         async with pool.acquire() as conn:
@@ -302,7 +301,7 @@ async def promote_curiosity_to_interest(
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (interest_id) DO UPDATE
                 SET current_strength = EXCLUDED.current_strength, updated_at = NOW()
-            """, interest_id, "system", f"Interest from {curiosity_node_id}", node_importance)
+            """, interest_id, session_id, f"Interest from {curiosity_node_id}", node_importance)
     logger.info(f"Interest created: {interest_id}")
     return interest_id
 
@@ -518,9 +517,9 @@ async def detect_contradictions_from_memories(session_id: str, current_turn: int
     """
     contradictions_found = []
     cycle_key = f"cycle_{current_turn // PROMOTION.contradiction_check_interval}"
-    if cycle_key in _contradiction_history:
+    if cycle_key in _contradiction_check_history:
         return contradictions_found
-    _contradiction_history[cycle_key] = datetime.now()
+    _contradiction_check_history[cycle_key] = datetime.now()
 
     pool = await get_pool()
     if not pool:
@@ -528,7 +527,7 @@ async def detect_contradictions_from_memories(session_id: str, current_turn: int
 
     async with pool.acquire() as conn:
         memories = await conn.fetch("""
-            SELECT id, content, significance, embedding, trace_id
+            SELECT id, content, significance, embedding
             FROM memories
             WHERE session_id = $1 AND significance > 0.6
             ORDER BY turn_number DESC
@@ -585,8 +584,9 @@ async def detect_contradictions_from_memories(session_id: str, current_turn: int
 
                 await promote_contradiction_to_curiosity(
                     contradiction_id,
-                    mem_a["trace_id"] or "system",
-                    severity
+                    mem_a["id"],
+                    severity,
+                    session_id=session_id,
                 )
                 contradictions_found.append(contradiction_id)
                 logger.info(f"Contradiction detected: {contradiction_id} (severity: {severity:.3f})")
@@ -631,7 +631,7 @@ async def archive_inactive_structures(current_turn: int) -> int:
             UPDATE patterns
             SET status = 'archived'
             WHERE status = 'emerging'
-              AND last_updated_turn < $1 - $2
+              AND last_updated_turn < ($1::int - $2::int)
             RETURNING pattern_id
         """, current_turn, PROMOTION.pattern_archive_age_turns)
         parts = result.split(" ")
