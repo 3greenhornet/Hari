@@ -144,6 +144,23 @@ class VolitionEngine:
                     target_item_type=None
                 ))
 
+        unbound_tension = sum(
+            d.base_tension for d in self._current_turn_desires
+            if not d.target_content
+        )
+        if unbound_tension > 0:
+            try:
+                state.update(
+                    {
+                        "arousal": min(0.15, unbound_tension * 0.15),
+                        "cognitive_tension": min(0.2, unbound_tension * 0.2),
+                    },
+                    source="DRIFT",
+                    reason="unbound_desire_pressure",
+                )
+            except Exception:
+                pass
+
     def _get_top_curiosity(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         curiosities = context.get("curiosity_nodes", [])
         return curiosities[0] if curiosities else None
