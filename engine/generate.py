@@ -113,6 +113,7 @@ class TurnPipeline:
         self._turn_counter = 0
         self._current_contamination_hits = 0
         self._recent_winner_contents: List[str] = []
+        self._last_top_curiosity_nodes: List[Dict[str, Any]] = []
 
     async def execute(
         self,
@@ -744,6 +745,7 @@ class TurnPipeline:
                 })
         except Exception:
             pass
+        self._last_top_curiosity_nodes = curiosity_nodes
 
         narrative_threads = self._active_threads or []
 
