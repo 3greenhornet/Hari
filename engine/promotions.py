@@ -211,18 +211,16 @@ async def promote_pattern_to_contradiction(
                 contradiction_id = f"contradiction_pattern_{pattern_id[:8]}_{int(datetime.now().timestamp())}"
                 await conn.execute("""
                     INSERT INTO contradictions (
-                        contradiction_id, belief_a, belief_b,
+                        contradiction_id, session_id, belief_a, belief_b,
                         source_a, source_b, severity, status, created_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 """, contradiction_id,
+                    session_id or "unknown",
                     pattern["description"][:200],
                     hyp["statement"],
                     pattern_id,
                     hyp["supporting_event_ids"][0] if hyp["supporting_event_ids"] else "unknown",
-                    severity,
-                    "active",
-                    datetime.now(timezone.utc)
-                )
+                    severity, "active", datetime.now(timezone.utc))
 
                 # Spawn curiosity
                 await promote_contradiction_to_curiosity(
@@ -307,7 +305,9 @@ async def promote_curiosity_to_interest(
 
 async def promote_interest_to_identity_anchor(
     interest_id: str,
-    stabilization_score: float
+    stabilization_score: float,
+    session_id: Optional[str] = None,
+    current_turn: Optional[int] = None,
 ) -> Optional[str]:
     """
     Ticket 019: Record an identity anchor when an interest stabilizes.
@@ -319,8 +319,8 @@ async def promote_interest_to_identity_anchor(
     anchor_id = f"anchor_{interest_id}"
     from models.development_event import DevelopmentEvent
     event = DevelopmentEvent(
-        session_id="system",
-        turn_number=0,
+        session_id=session_id or "unknown",
+        turn_number=current_turn or 0,
         event_type="identity_anchor_formed",
         source_attribution=[],
         confidence=stabilization_score,
@@ -490,8 +490,8 @@ async def process_staging_proposals(session_id: str, current_turn: int) -> Dict[
                     elif ev.proposal_type == "self_belief":
                         await conn.execute("""
                             INSERT INTO self_beliefs (id, session_id, belief_text, created_at)
-                            VALUES ($1, 'system', $2, NOW())
-                        """, str(uuid.uuid4()), ev.content)
+                            VALUES ($1, $2, $3, NOW())
+                        """, str(uuid.uuid4()), session_id, ev.content)
                         results["accepted"] += 1
                 else:
                     status = 'rejected'
@@ -569,18 +569,13 @@ async def detect_contradictions_from_memories(session_id: str, current_turn: int
                 contradiction_id = f"contradiction_{mem_a['id'][:8]}_{mem_b['id'][:8]}_{int(datetime.now().timestamp())}"
                 await conn.execute("""
                     INSERT INTO contradictions (
-                        contradiction_id, belief_a, belief_b,
+                        contradiction_id, session_id, belief_a, belief_b,
                         source_a, source_b, severity, status, created_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                """, contradiction_id,
-                    mem_a["content"][:200],
-                    mem_b["content"][:200],
-                    mem_a["id"],
-                    mem_b["id"],
-                    severity,
-                    "active",
-                    datetime.now(timezone.utc)
-                )
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                """, contradiction_id, session_id,
+                    mem_a["content"][:200], mem_b["content"][:200],
+                    mem_a["id"], mem_b["id"], severity, "active",
+                    datetime.now(timezone.utc))
 
                 await promote_contradiction_to_curiosity(
                     contradiction_id,
