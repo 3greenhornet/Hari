@@ -1,4 +1,4 @@
-"""
+﻿"""
 engine/generate.py — TurnPipeline: the cognitive loop.
 
 Orchestrates one turn: prediction → retrieval → monologue → volition →
@@ -29,9 +29,9 @@ from engine.attention import (
     load_workspace,
     settle_workspace,
     broadcast_feedback,
-    WorkspaceItem,
     load_workspace_secured,
 )
+from models.workspace import WorkspaceItem
 from engine.stage1_monologue import run_monologue
 from models.memory_event import MemoryEvent
 from engine.generativity_estimator import get_estimator
