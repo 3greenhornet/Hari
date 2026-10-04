@@ -1001,13 +1001,23 @@ Output valid JSON only.
                 "She is not required to respond to it."
             )
         else:
-            conversation_payload = (
-                f"{stance_text}\n\n{rationale_text}\n\n"
-                f"WINNING COGNITIVE ITEM:\n{winner_content}\n\n"
-                f"OTHER ACTIVE MATERIAL:\n{context_string}\n\n"
-                f"INCOMING EVENT:\n{user_input}\n\n"
-                "Generate only Hari's actual next utterance."
-            )
+            if is_pivot:
+                conversation_payload = (
+                    f"{stance_text}\n\n{rationale_text}\n\n"
+                    f"WINNING COGNITIVE ITEM:\n{winner_content}\n\n"
+                    f"OTHER ACTIVE MATERIAL:\n{context_string}\n\n"
+                    "Her next utterance follows from her current cognition. "
+                    "She is not required to respond to the previous message. "
+                    "If her cognition has moved elsewhere, she says what she has moved to."
+                )
+            else:
+                conversation_payload = (
+                    f"{stance_text}\n\n{rationale_text}\n\n"
+                    f"WINNING COGNITIVE ITEM:\n{winner_content}\n\n"
+                    f"OTHER ACTIVE MATERIAL:\n{context_string}\n\n"
+                    f"INCOMING EVENT:\n{user_input}\n\n"
+                    "Generate only Hari's actual next utterance."
+                )
 
         transcript = [
             ("Hari" if m.get("role") == "assistant" else "the other person",
