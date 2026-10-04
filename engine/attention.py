@@ -46,12 +46,11 @@ logger = logging.getLogger(__name__)
 
 
 def _authority_weight(candidate: Dict[str, Any]) -> float:
-    """Compute a structural provenance weight for a workspace candidate."""
     origin = str(candidate.get("origin") or "")
     source = str(candidate.get("source") or "")
-    if origin.startswith("volition") or origin in ("internal_cognition", "curiosity_spreading"):
-        return 1.0
-    if source in ("volition", "volition_persistent", "internal_cognition", "curiosity_spreading"):
+    internal_source = str(candidate.get("internal_source") or "")
+    marker = f"{origin}|{source}|{internal_source}"
+    if "volition" in marker or "internal_cognition" in marker or "curiosity_spreading" in marker:
         return 1.0
     if origin in ("narrative", "self_belief", "perspective"):
         return 0.85
@@ -364,6 +363,7 @@ async def load_workspace(
     instrumentation: Optional[AttentionInstrumentation] = None,   # NEW
     active_thought_texts: Optional[List[str]] = None,
     refractory: Optional[Any] = None,
+    attention_config: Optional[AttentionCalibration] = None,
 ) -> Tuple[List[WorkspaceItem], Dict[str, Any]]:
     """
     Loads the cognitive workspace using pressure fields + softmax competition.
@@ -568,7 +568,7 @@ async def load_workspace(
         total_salience = await compute_total_salience(
             pressures, 
             state,
-            config=DEFAULT_ATTENTION_CONFIG,
+            config=attention_config or DEFAULT_ATTENTION_CONFIG,
             instrumentation=instrumentation,
             candidate_id=source_id,
             candidate_type=item_type,
@@ -679,7 +679,8 @@ async def load_workspace(
             support_temperature,
         )
 
-        supporting_indices = np.random.choice(
+        rng = _rng()
+        supporting_indices = rng.choice(
             remaining_indices,
             size=num_supporting,
             replace=False,
