@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class TickRunner:
     def __init__(self, pipeline: TurnPipeline,
                  interval_seconds: float = 30.0,
-                 min_pressure: float = 0.55):
+                 min_pressure: float = 0.15):
         self.pipeline = pipeline
         self.interval_seconds = interval_seconds
         self.min_pressure = min_pressure
@@ -46,6 +46,21 @@ class TickRunner:
             pressure = max(pressure, state.curiosity * 0.8)
         if state.completion > 0.7:
             pressure = max(pressure, state.completion * 0.75)
+        # Narrative pressure: unfinished threads want attention
+        try:
+            if self.pipeline._active_threads:
+                top_thread = self.pipeline._active_threads[0]
+                closure = (1.0 - float(top_thread.completion_estimate)) * float(top_thread.emotional_investment)
+                pressure = max(pressure, closure * 0.7)
+        except Exception:
+            pass
+        # Curiosity graph importance (survives on fresh sessions if any nodes exist)
+        try:
+            nodes = self.pipeline._last_top_curiosity_nodes
+            if nodes:
+                pressure = max(pressure, float(nodes[0].get("importance", 0.0)) * 0.6)
+        except Exception:
+            pass
         return pressure
 
     async def _run(self) -> None:
