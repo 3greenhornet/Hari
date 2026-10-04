@@ -229,7 +229,7 @@ class TurnPipeline:
         self._current_contamination_hits = contamination_hits
 
         if not monologue_output.observations and not monologue_output.internal_candidates:
-            self._event_logger.log_substrate_fault(reason="empty_monologue_output")
+            self._event_logger.log_substrate_fault(reason="empty monologue_output")
         if monologue_output.internal_candidates:
             top_candidate = max(
                 monologue_output.internal_candidates,
