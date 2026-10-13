@@ -22,6 +22,14 @@ def get_genai_client():
         _genai_client = genai.Client(api_key=GEMINI_API_KEY)
     return _genai_client
 
+def _coerce_embedding(value) -> Optional[List[float]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value
+    return list(value)
+
+
 async def embed(text: str) -> List[float]:
     client = get_genai_client()
     response = await client.aio.models.embed_content(
@@ -140,7 +148,7 @@ async def retrieve_candidates(
             """, query_embedding, session_id, similarity_threshold, limit)
     memories = []
     for row in rows:
-        embedding_value = row["embedding"]
+        embedding_value = _coerce_embedding(row["embedding"])
 
         mem = MemoryEvent(
             id=row["id"],
@@ -240,7 +248,7 @@ async def retrieve_candidates_hybrid(
     Returns up to `limit` candidates with computed scores.
     """
     if not query or not query.strip():
-        return []    
+        return []
     from db.connection import get_pool
     pool = await get_pool()
     if pool is None:
@@ -253,7 +261,7 @@ async def retrieve_candidates_hybrid(
             SELECT id, session_id, turn_number, role, content, event_type,
                    thematic_tags, significance, meaning_summary,
                    usage_count, last_retrieved_turn, explanatory_power, created_at,
-                   valence, arousal,
+                   valence, arousal, embedding,
                    (1 - (embedding <=> $1)) AS vector_similarity,
                    ts_rank_cd(text_search_vector, plainto_tsquery('english', $2)) AS keyword_score
             FROM memories
@@ -269,6 +277,20 @@ async def retrieve_candidates_hybrid(
     candidates: List[MemoryEvent] = []
 
     for row in rows:
+        raw_embedding = row["embedding"]
+        embedding_value = None
+        if raw_embedding is not None:
+            # pgvector returns a Vector object. It supports numpy-style
+            # conversion but not list(). Use np.asarray to get a plain array,
+            # then tolist() for a Python list of floats.
+            try:
+                embedding_value = np.asarray(raw_embedding, dtype=np.float32).tolist()
+            except Exception:
+                try:
+                    embedding_value = list(map(float, raw_embedding))
+                except Exception:
+                    embedding_value = None
+
         mem = MemoryEvent(
             id=row["id"],
             session_id=row["session_id"],
@@ -279,7 +301,7 @@ async def retrieve_candidates_hybrid(
             thematic_tags=row["thematic_tags"] or [],
             significance=row["significance"],
             meaning_summary=row["meaning_summary"],
-            embedding=None,
+            embedding=embedding_value,
             created_at=row["created_at"],
             usage_count=row["usage_count"],
             last_retrieved_turn=row["last_retrieved_turn"],
@@ -309,7 +331,6 @@ async def retrieve_candidates_hybrid(
         if state_drives.get("completion", 0.0) > 0.7 and mem.event_type in ("open_thread", "tension"):
             drive_boost += 0.20
 
-        # --- ACT‑R and Somatic Bonus ---
         actr_score = compute_full_actr_activation(
             mem, current_turn, query_embedding, decay_d=0.5, noise_s=0.25
         )
@@ -325,6 +346,149 @@ async def retrieve_candidates_hybrid(
     candidates.sort(key=lambda x: x.computed_score, reverse=True)
     return candidates
 
+
+
+async def retrieve_multi_source(
+    session_id: str,
+    current_turn: int,
+    event_text: str,
+    active_thought_texts: List[str],
+    active_question_texts: List[str],
+    per_source_limit: int = 8,
+) -> List[MemoryEvent]:
+    """Merge event, endogenous, question, keyword, and recency retrieval streams."""
+    import asyncio
+    from db.connection import get_pool
+
+    pool = await get_pool()
+    if pool is None:
+        return []
+
+    async def vector_search(text: str) -> List[MemoryEvent]:
+        if not text or not text.strip():
+            return []
+        try:
+            embedding = await embed(text)
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, session_id, turn_number, role, content, event_type,
+                           thematic_tags, significance, meaning_summary,
+                           usage_count, last_retrieved_turn, explanatory_power,
+                           created_at, 1 - (embedding <=> $1) AS similarity
+                    FROM memories
+                    WHERE session_id = $2 AND embedding IS NOT NULL
+                      AND 1 - (embedding <=> $1) > 0.30
+                    ORDER BY similarity DESC LIMIT $3
+                    """,
+                    embedding,
+                    session_id,
+                    per_source_limit,
+                )
+        except Exception as error:
+            logger.warning("Vector retrieval stream failed: %s", error)
+            return []
+        results = []
+        for row in rows:
+            memory = MemoryEvent(
+                id=row["id"], session_id=row["session_id"], turn_number=row["turn_number"],
+                role=row["role"], content=row["content"], event_type=row["event_type"],
+                thematic_tags=row["thematic_tags"] or [], significance=row["significance"],
+                meaning_summary=row["meaning_summary"], created_at=row["created_at"],
+                usage_count=row["usage_count"] or 0,
+                last_retrieved_turn=row["last_retrieved_turn"] or 0,
+                explanatory_power=row["explanatory_power"] or 0.5,
+            )
+            memory.computed_score = float(row["similarity"] or 0.0)
+            results.append(memory)
+        return results
+
+    async def keyword_search(text: str) -> List[MemoryEvent]:
+        if not text or not text.strip():
+            return []
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, session_id, turn_number, role, content, event_type,
+                           thematic_tags, significance, meaning_summary,
+                           usage_count, last_retrieved_turn, explanatory_power,
+                           created_at, ts_rank_cd(text_search_vector,
+                           plainto_tsquery('english', $2)) AS keyword_score
+                    FROM memories
+                    WHERE session_id = $1
+                      AND text_search_vector @@ plainto_tsquery('english', $2)
+                    ORDER BY keyword_score DESC LIMIT $3
+                    """,
+                    session_id,
+                    text,
+                    per_source_limit,
+                )
+        except Exception as error:
+            logger.warning("Keyword retrieval stream failed: %s", error)
+            return []
+        results = []
+        for row in rows:
+            memory = MemoryEvent(
+                id=row["id"], session_id=row["session_id"], turn_number=row["turn_number"],
+                role=row["role"], content=row["content"], event_type=row["event_type"],
+                thematic_tags=row["thematic_tags"] or [], significance=row["significance"],
+                meaning_summary=row["meaning_summary"], created_at=row["created_at"],
+                usage_count=row["usage_count"] or 0,
+                last_retrieved_turn=row["last_retrieved_turn"] or 0,
+                explanatory_power=row["explanatory_power"] or 0.5,
+            )
+            memory.computed_score = min(1.0, float(row["keyword_score"] or 0.0))
+            results.append(memory)
+        return results
+
+    texts = []
+    if event_text and event_text.strip():
+        texts.extend((vector_search(event_text), keyword_search(event_text)))
+    if active_thought_texts:
+        joined = " ; ".join(text for text in active_thought_texts[:4] if text and text.strip())
+        if joined:
+            texts.append(vector_search(joined))
+    if active_question_texts:
+        joined = " ; ".join(text for text in active_question_texts[:4] if text and text.strip())
+        if joined:
+            texts.append(vector_search(joined))
+
+    groups = await asyncio.gather(*texts) if texts else []
+    merged: Dict[str, MemoryEvent] = {}
+    for group in groups:
+        for memory in group:
+            current = merged.get(memory.id)
+            if current is None or memory.computed_score > current.computed_score:
+                merged[memory.id] = memory
+
+    async with pool.acquire() as conn:
+        recent_rows = await conn.fetch(
+            """
+            SELECT id, session_id, turn_number, role, content, event_type,
+                   thematic_tags, significance, meaning_summary, usage_count,
+                   last_retrieved_turn, explanatory_power, created_at
+            FROM memories WHERE session_id = $1
+            ORDER BY turn_number DESC LIMIT $2
+            """,
+            session_id,
+            per_source_limit,
+        )
+    for row in recent_rows:
+        if row["id"] in merged:
+            continue
+        memory = MemoryEvent(
+            id=row["id"], session_id=row["session_id"], turn_number=row["turn_number"],
+            role=row["role"], content=row["content"], event_type=row["event_type"],
+            thematic_tags=row["thematic_tags"] or [], significance=row["significance"],
+            meaning_summary=row["meaning_summary"], created_at=row["created_at"],
+            usage_count=row["usage_count"] or 0,
+            last_retrieved_turn=row["last_retrieved_turn"] or 0,
+            explanatory_power=row["explanatory_power"] or 0.5,
+            computed_score=0.30,
+        )
+        merged[memory.id] = memory
+    return list(merged.values())
 
 
 async def get_memory_by_id(memory_id: str) -> Optional[MemoryEvent]:

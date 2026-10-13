@@ -247,6 +247,98 @@ def compute_avg_response_length(events: List[Dict[str, Any]]) -> float:
     return sum(lengths) / max(1, len(lengths))
 
 
+def compute_homeostatic_trend(events: List[Dict[str, Any]]) -> Dict[str, float]:
+    deltas = []
+    violations = 0
+    for event in events:
+        if event["event_type"] == "homeostatic_reward":
+            deltas.append(event["payload"].get("delta", 0.0))
+            if event["payload"].get("viability_violated"):
+                violations += 1
+    if len(deltas) < 3:
+        return {"mean": 0.0, "trend": 0.0, "count": len(deltas), "violations": violations}
+    mean = sum(deltas) / len(deltas)
+    center = (len(deltas) - 1) / 2
+    denominator = sum((i - center) ** 2 for i in range(len(deltas)))
+    numerator = sum((i - center) * (delta - mean) for i, delta in enumerate(deltas))
+    return {
+        "mean": mean,
+        "trend": numerator / denominator if denominator else 0.0,
+        "count": len(deltas),
+        "violations": violations,
+    }
+
+
+def compute_cognitive_proactivity(events: List[Dict[str, Any]]) -> float:
+    internal_origins = {"volition", "volition_persistent", "curiosity_spreading", "internal_cognition"}
+    internal_wins = 0
+    total_turns = 0
+    for event in events:
+        if event["event_type"] == "decision_trace":
+            origin = event["payload"].get("winner_origin")
+            if origin is not None:
+                total_turns += 1
+                internal_wins += origin in internal_origins
+    return internal_wins / total_turns if total_turns else 0.0
+
+
+def compute_cognitive_richness_trend(events: List[Dict[str, Any]]) -> Dict[str, float]:
+    internal_origins = {"volition", "volition_persistent", "curiosity_spreading", "internal_cognition"}
+    diversity = []
+    proactivity = []
+    substance = []
+    seen_memories = set()
+    total_memories = 0
+    for event in events:
+        event_type = event["event_type"]
+        payload = event["payload"]
+        if event_type == "decision_trace":
+            workspace = payload.get("workspace_items", []) or []
+            diversity.append(float(len({item.get("item_type") for item in workspace if isinstance(item, dict)})))
+            proactivity.append(1.0 if payload.get("winner_origin") in internal_origins else 0.0)
+        elif event_type == "monologue_output":
+            substance.append(1.0 if (payload.get("observations") or payload.get("questions")) else 0.0)
+        elif event_type == "memory_retrieval":
+            for memory_id in payload.get("top_memories", []) or []:
+                total_memories += 1
+                seen_memories.add(memory_id)
+
+    def slope(values: List[float]) -> float:
+        if len(values) < 3:
+            return 0.0
+        center = (len(values) - 1) / 2
+        mean = sum(values) / len(values)
+        denominator = sum((i - center) ** 2 for i in range(len(values)))
+        numerator = sum((i - center) * (value - mean) for i, value in enumerate(values))
+        return numerator / denominator if denominator else 0.0
+
+    return {
+        "workspace_diversity_mean": sum(diversity) / len(diversity) if diversity else 0.0,
+        "workspace_diversity_trend": slope(diversity),
+        "proactivity_mean": sum(proactivity) / len(proactivity) if proactivity else 0.0,
+        "proactivity_trend": slope(proactivity),
+        "monologue_substance_mean": sum(substance) / len(substance) if substance else 0.0,
+        "monologue_substance_trend": slope(substance),
+        "memory_reuse_rate": 1.0 - len(seen_memories) / total_memories if total_memories else 0.0,
+    }
+
+
+def compute_prediction_error_trend(events: List[Dict[str, Any]]) -> Dict[str, float]:
+    errors = [
+        float(event["payload"]["trajectory_deviation"])
+        for event in events
+        if event["event_type"] == "monologue_output"
+        and event["payload"].get("trajectory_deviation") is not None
+    ]
+    if len(errors) < 3:
+        return {"trend": 0.0, "mean": sum(errors) / len(errors) if errors else 0.0}
+    center = (len(errors) - 1) / 2
+    mean = sum(errors) / len(errors)
+    denominator = sum((i - center) ** 2 for i in range(len(errors)))
+    numerator = sum((i - center) * (error - mean) for i, error in enumerate(errors))
+    return {"trend": numerator / denominator if denominator else 0.0, "mean": mean}
+
+
 def generate_report(events: List[Dict[str, Any]], session_id: str) -> Dict[str, Any]:
     """Generate a full report from events."""
     return {
@@ -258,7 +350,11 @@ def generate_report(events: List[Dict[str, Any]], session_id: str) -> Dict[str, 
         "drive_movement": compute_drive_movement(events),
         "workspace_diversity": compute_workspace_diversity(events),
         "avg_response_length": compute_avg_response_length(events),
-        "timestamp": datetime.now().isoformat()
+        "homeostatic_trend": compute_homeostatic_trend(events),
+        "cognitive_proactivity": compute_cognitive_proactivity(events),
+        "cognitive_richness": compute_cognitive_richness_trend(events),
+        "prediction_error_trend": compute_prediction_error_trend(events),
+        "timestamp": datetime.now().isoformat(),
     }
 
 

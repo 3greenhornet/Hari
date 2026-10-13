@@ -18,17 +18,11 @@ class ForgettingParams:
 @dataclass(frozen=True)
 class SocialParams:
     """Ticket 015: Social interpretation calibration."""
-    thematic_continuity_weight: float = 0.4
-    trajectory_deviation_weight: float = 0.3
-    engagement_weight: float = 0.2
-    history_weight: float = 0.1
+    trajectory_deviation_weight: float = 1.0
     uncertainty_coeff: float = 0.3
-    engagement_coeff: float = 0.25   # was 0.05
-    
     social_ambiguity_coeff: float = 0.2
     familiarity_growth_coeff: float = 0.01
     familiarity_shift_decay_coeff: float = 0.005
-    trust_sincerity_coeff: float = 0.005
     trust_avoidance_coeff: float = 0.01
 
 

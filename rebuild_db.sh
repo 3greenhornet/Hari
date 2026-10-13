@@ -30,6 +30,14 @@ echo "Running migrations..."
 docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/002_decision_trace.sql
 docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/003_development_ledger.sql
 docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/004_hybrid_retrieval.sql
+docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/005_deassistant.sql
+docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/006_pursuits.sql
+docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/007_homeostatic_reward.sql
+docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/008_reflection_edits.sql
+docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/009_architectural_inversion.sql
+docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/010_session_ownership.sql
+docker exec -i hari-postgres psql -U postgres -d hari_cognitive < db/migrations/011_edge_weights.sql
+
 
 echo "Adding custom columns and indexes..."
 docker exec -i hari-postgres psql -U postgres -d hari_cognitive -c "
@@ -41,7 +49,7 @@ ALTER TABLE trace_workspace_items ADD COLUMN IF NOT EXISTS origin TEXT;
 ALTER TABLE trace_workspace_items ADD COLUMN IF NOT EXISTS activated_by TEXT;
 ALTER TABLE trace_workspace_items ADD COLUMN IF NOT EXISTS intrinsic_relevance REAL DEFAULT 0.0;
 ALTER TABLE trace_workspace_items ADD COLUMN IF NOT EXISTS persistence REAL DEFAULT 0.0;
-UPDATE hypotheses SET type = 'other' WHERE type = 'user';
+UPDATE hypotheses SET type = 'person' WHERE type IN ('user', 'other');
 DROP INDEX IF EXISTS memories_embedding_idx;
 CREATE INDEX IF NOT EXISTS memories_embedding_hnsw_idx ON memories USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE TABLE IF NOT EXISTS patterns (

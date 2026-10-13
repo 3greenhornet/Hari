@@ -1,97 +1,56 @@
-"""
-engine/config.py — Global configuration and constants for the Hari system.
-
-Contains the AttentionCalibration dataclass, experiment flags, and environment
-variable loading. All magic numbers are centralized here for calibration.
-"""
+"""Centralized configuration for Sprint 1 experiments."""
 
 import os
-from dataclasses import dataclass
-from typing import Dict, Any, Optional
 
 
-@dataclass
-class AttentionCalibration:
-    event_affinity_base: float = 0.30
-    endogenous_affinity_base: float = 0.20
-    novelty_base: float = 0.35
-    curiosity_base: float = 0.35
-    completion_base: float = 0.35
-    exploratory_base: float = 0.30
-    shared_significance_base: float = 0.30
-    coherence_tension_base: float = 0.30
-    engagement_modulation: float = 0.10
-    curiosity_modulation: float = 0.50
-    novelty_modulation: float = 0.50
-    completion_modulation: float = 0.50
-    exploratory_modulation: float = 0.40
-    shared_significance_modulation: float = 0.40
-    coherence_tension_modulation: float = 0.50
-    max_engagement_influence: float = 0.30
-    engagement_decay: float = 0.01
-    normalize_weights: bool = True
-    log_pressure_contributions: bool = True
-    log_frequency: int = 10
-    experiment_id: Optional[str] = None
-    intrinsic_relevance_base: float = 0.0
-    intrinsic_relevance_curiosity_modulation: float = 1.0
-    authority_base: float = 0.25
-    persistence_base: float = 0.20
-    internal_activation_base: float = 0.20
-    internal_standing_base: float = 0.15
-    internal_standing_modulation: float = 0.30
-    hari_expression_mode: str = "continuation"
-
-    @classmethod
-    def from_env(cls) -> "AttentionCalibration":
-        return cls(
-            event_affinity_base=float(os.getenv("EVENT_AFFINITY_BASE", "0.30")),
-            endogenous_affinity_base=float(os.getenv("ENDOGENOUS_AFFINITY_BASE", "0.20")),
-            novelty_base=float(os.getenv("ATTENTION_NOVELTY_BASE", "0.35")),
-            curiosity_base=float(os.getenv("ATTENTION_CURIOSITY_BASE", "0.35")),
-            completion_base=float(os.getenv("ATTENTION_COMPLETION_BASE", "0.35")),
-            exploratory_base=float(os.getenv("ATTENTION_EXPLORATORY_BASE", "0.30")),
-            shared_significance_base=float(os.getenv("ATTENTION_SHARED_BASE", "0.30")),
-            coherence_tension_base=float(os.getenv("ATTENTION_COHERENCE_TENSION_BASE", "0.30")),
-            engagement_modulation=float(os.getenv("ATTENTION_ENGAGEMENT_MOD", "0.10")),
-            curiosity_modulation=float(os.getenv("ATTENTION_CURIOSITY_MOD", "0.50")),
-            novelty_modulation=float(os.getenv("ATTENTION_NOVELTY_MOD", "0.50")),
-            completion_modulation=float(os.getenv("ATTENTION_COMPLETION_MOD", "0.50")),
-            exploratory_modulation=float(os.getenv("ATTENTION_EXPLORATORY_MOD", "0.40")),
-            shared_significance_modulation=float(os.getenv("ATTENTION_SHARED_MOD", "0.40")),
-            coherence_tension_modulation=float(os.getenv("ATTENTION_COHERENCE_TENSION_MOD", "0.50")),
-            max_engagement_influence=float(os.getenv("ATTENTION_MAX_ENGAGEMENT", "0.30")),
-            engagement_decay=float(os.getenv("ATTENTION_ENGAGEMENT_DECAY", "0.01")),
-            log_pressure_contributions=os.getenv("ATTENTION_LOG", "True").lower() == "true",
-            experiment_id=os.getenv("ATTENTION_EXPERIMENT_ID", None),
-            authority_base=float(os.getenv("AUTHORITY_BASE", "0.25")),
-            persistence_base=float(os.getenv("PERSISTENCE_BASE", "0.20")),
-            internal_activation_base=float(os.getenv("INTERNAL_ACTIVATION_BASE", "0.20")),
-            internal_standing_base=float(os.getenv("INTERNAL_STANDING_BASE", "0.15")),
-            internal_standing_modulation=float(os.getenv("INTERNAL_STANDING_MOD", "0.30")),
-        )
-
-    def get_weights(self, state: Any, previous_engagement: Optional[float] = None) -> Dict[str, float]:
-        raw = {
-            "event_affinity": self.event_affinity_base,
-            "endogenous_affinity": self.endogenous_affinity_base,
-            "novelty": self.novelty_base + (float(state.curiosity) * self.novelty_modulation),
-            "curiosity": self.curiosity_base + (float(state.curiosity) * self.curiosity_modulation),
-            "completion": self.completion_base + (float(state.completion) * self.completion_modulation),
-            "exploratory_potential": self.exploratory_base + (float(state.novelty) * self.exploratory_modulation),
-            "shared_significance": self.shared_significance_base + (float(state.care) * self.shared_significance_modulation),
-            "coherence_tension": self.coherence_tension_base + (float(state.cognitive_tension) * self.coherence_tension_modulation),
-            "intrinsic_relevance": 0.20 + (float(state.curiosity) * 0.50) + (float(state.completion) * 0.20) + (float(state.coherence) * 0.20),
-        }
-        if os.getenv("ENABLE_AUTHORITY_CAUSAL", "false").lower() == "true":
-            raw["authority"] = self.authority_base
-        for key in raw:
-            raw[key] = max(0.1, raw[key])
-        if self.normalize_weights:
-            total = sum(raw.values())
-            if total > 0:
-                raw = {k: v / total for k, v in raw.items()}
-        return raw
+def _bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() == "true"
 
 
-DEFAULT_ATTENTION_CONFIG = AttentionCalibration()
+VOICE_BACKEND = os.getenv("VOICE_BACKEND", "legacy")
+VOICE_MODEL = os.getenv("VOICE_MODEL", "")
+VOICE_STRICT = _bool("VOICE_STRICT")
+BASE_MODEL = os.getenv("BASE_MODEL", "Qwen/Qwen3-8B-Base")
+
+EVENT_AFFINITY_BASE = float(os.getenv("EVENT_AFFINITY_BASE", "0.30"))
+ENDOGENOUS_AFFINITY_BASE = float(os.getenv("ENDOGENOUS_AFFINITY_BASE", "0.20"))
+PERSISTENCE_BASE = float(os.getenv("PERSISTENCE_BASE", "0.20"))
+INTERNAL_ACTIVATION_BASE = float(os.getenv("INTERNAL_ACTIVATION_BASE", "0.20"))
+AUTHORITY_BASE = float(os.getenv("AUTHORITY_BASE", "0.25"))
+
+MAX_ACTIVE_THOUGHTS = int(os.getenv("MAX_ACTIVE_THOUGHTS", "20"))
+THOUGHT_DECAY = float(os.getenv("THOUGHT_DECAY", "0.92"))
+THOUGHT_FLOOR = float(os.getenv("THOUGHT_FLOOR", "0.08"))
+THOUGHT_PROMOTE_THRESHOLD = float(os.getenv("THOUGHT_PROMOTE_THRESHOLD", "0.25"))
+MAX_ACTIVE_QUESTIONS = int(os.getenv("MAX_ACTIVE_QUESTIONS", "10"))
+QUESTION_FADE_TURNS = int(os.getenv("QUESTION_FADE_TURNS", "5"))
+
+REFRACTORY_TURNS = int(os.getenv("REFRACTORY_TURNS", "2"))
+REFRACTORY_SIMILARITY = float(os.getenv("REFRACTORY_SIMILARITY", "0.85"))
+REFRACTORY_MAX_PENALTY = float(os.getenv("REFRACTORY_MAX_PENALTY", "0.5"))
+
+PURSUIT_ACTIVE_THRESHOLD = float(os.getenv("PURSUIT_ACTIVE_THRESHOLD", "0.30"))
+PURSUIT_DEAD_THRESHOLD = float(os.getenv("PURSUIT_DEAD_THRESHOLD", "0.10"))
+PURSUIT_DECAY_FACTOR = float(os.getenv("PURSUIT_DECAY_FACTOR", "0.95"))
+PURSUIT_REINFORCE_WINNER = float(os.getenv("PURSUIT_REINFORCE_WINNER", "0.08"))
+PURSUIT_REINFORCE_TOP3 = float(os.getenv("PURSUIT_REINFORCE_TOP3", "0.04"))
+PURSUIT_SIMILARITY_THRESHOLD = float(os.getenv("PURSUIT_SIMILARITY_THRESHOLD", "0.85"))
+
+REFLECTION_EDIT_INTERVAL_TURNS = int(os.getenv("REFLECTION_EDIT_INTERVAL_TURNS", "5"))
+REFLECTION_EDIT_MAX_DELTA = float(os.getenv("REFLECTION_EDIT_MAX_DELTA", "0.05"))
+
+ENABLE_DETERMINISTIC_CASCADES = _bool("ENABLE_DETERMINISTIC_CASCADES")
+ENABLE_GRACE = _bool("ENABLE_GRACE")
+ENABLE_VOLITION_CAUSAL = _bool("ENABLE_VOLITION_CAUSAL")
+ENABLE_REFLEXION = _bool("ENABLE_REFLEXION")
+ENABLE_BROADCAST_FEEDBACK = _bool("ENABLE_BROADCAST_FEEDBACK")
+ENABLE_PRM = _bool("ENABLE_PRM")
+ENABLE_LECTURER_PENALTY = _bool("ENABLE_LECTURER_PENALTY")
+ENABLE_SEMANTIC_REFRACTORY = _bool("ENABLE_SEMANTIC_REFRACTORY")
+ENABLE_AUTHORITY_CAUSAL = _bool("ENABLE_AUTHORITY_CAUSAL")
+
+STERILE_MODE = _bool("STERILE_MODE")
+HARI_EXPRESSION_MODE = os.getenv("HARI_EXPRESSION_MODE", "continuation")
+TELEMETRY_ENABLED = _bool("TELEMETRY_ENABLED", "true")
+EXPERIMENT_SEED = os.getenv("EXPERIMENT_SEED", "")
+RETRIEVAL_PER_SOURCE_LIMIT = int(os.getenv("RETRIEVAL_PER_SOURCE_LIMIT", "8"))

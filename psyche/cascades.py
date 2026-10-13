@@ -1,8 +1,9 @@
 ﻿# hari/psyche/cascades.py
 """
-Deterministic state updates applied every turn after LLM deltas.
-These simulate fatigue, sovereignty, coherence stress, completion pressure,
-and session horizon (mortality pressure).
+psyche/cascades.py
+CAUSAL STATUS: DISABLED for Sprint 1.
+These hand-written state rules are retained for ablation only.
+Do not re-enable without sign-off.
 """
 
 from .state import HariState

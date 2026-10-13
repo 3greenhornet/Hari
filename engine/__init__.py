@@ -1,20 +1,67 @@
 # hari/engine/__init__.py
 """
 Engine package for Hari cognitive architecture.
-External code should import TurnPipeline from .generate directly.
+
+The runtime maintains a persistent TurnPipeline per session. Do not create
+fresh pipelines per call — that loses all persistence.
 """
 
-from .generate import TurnPipeline, generate_lightweight_response
+import asyncio
 import uuid
+from typing import Dict, Optional
 
-async def generate_hari_response(user_input: str) -> dict:
-    """Wrapper for Streamlit app to get a response in one turn."""
+from .generate import TurnPipeline, generate_lightweight_response
+
+_pipelines: Dict[str, TurnPipeline] = {}
+_pipeline_lock = asyncio.Lock()
+
+
+async def get_or_create_pipeline(session_id: Optional[str] = None) -> TurnPipeline:
+    """Return the persistent pipeline for this session, creating it once."""
     from psyche.state import HariState
-    from psyche.grace import GraceTracker
-    session_id = str(uuid.uuid4())[:8]
-    state = HariState()
-    grace = GraceTracker()
-    pipeline = TurnPipeline(session_id, state, grace)
-    return await pipeline.execute(user_input, turn_count=1, trace_id=str(uuid.uuid4()))
+    session_id = session_id or "default"
+    async with _pipeline_lock:
+        if session_id not in _pipelines:
+            state = HariState()
+            _pipelines[session_id] = TurnPipeline(session_id, state)
+            try:
+                from engine.tick import TickRunner
+                runner = TickRunner(_pipelines[session_id])
+                runner.start()
+                _pipelines[session_id]._tick_runner = runner
+            except Exception:
+                pass
+        return _pipelines[session_id]
 
-__all__ = ["TurnPipeline", "generate_lightweight_response", "generate_hari_response"]
+
+async def shutdown_pipeline(session_id: str) -> None:
+    async with _pipeline_lock:
+        pipeline = _pipelines.pop(session_id, None)
+        if pipeline is None:
+            return
+        runner = getattr(pipeline, "_tick_runner", None)
+        if runner is not None:
+            try:
+                await runner.stop()
+            except Exception:
+                pass
+        try:
+            pipeline.shutdown()
+        except Exception:
+            pass
+
+
+async def generate_hari_response(user_input: str, session_id: Optional[str] = None) -> dict:
+    pipeline = await get_or_create_pipeline(session_id)
+    turn_count = getattr(pipeline, "_turn_counter", 0) + 1
+    pipeline._turn_counter = turn_count
+    return await pipeline.execute(user_input, turn_count, trace_id=str(uuid.uuid4()))
+
+
+__all__ = [
+    "TurnPipeline",
+    "generate_lightweight_response",
+    "generate_hari_response",
+    "get_or_create_pipeline",
+    "shutdown_pipeline",
+]

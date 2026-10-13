@@ -1,4 +1,4 @@
-"""
+﻿"""
 engine/attention.py — Cognitive Workspace & Attention System (Pressure‑Field Architecture)
 
 Implements a Global Workspace Theory (GWT) selection–broadcast cycle using a
@@ -41,6 +41,7 @@ from engine.attention_config import DEFAULT_ATTENTION_CONFIG, AttentionCalibrati
 from engine.attention_instrumentation import AttentionInstrumentation
 from engine.generativity_estimator import get_estimator
 from models.narrative import NarrativeThread
+from models.workspace import WorkspaceItem, ActivationMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -894,12 +895,13 @@ async def settle_workspace(
     winner_history: List[str] = []
     final_winner: Optional[WorkspaceItem] = None
     final_supporters: List[WorkspaceItem] = []
+    last_telemetry: Dict[str, Any] = {}
     round_count = 0
 
     for round_idx in range(max_rounds):
         round_count = round_idx + 1
 
-        workspace_items, telemetry = await load_workspace(
+        workspace_items, round_telemetry = await load_workspace(
             memories=memories,
             hypotheses=hypotheses,
             curiosity_nodes=curiosity_nodes,
@@ -917,6 +919,7 @@ async def settle_workspace(
             refractory=refractory,
             attention_config=attention_config,
         )
+        last_telemetry = round_telemetry
 
         if not workspace_items:
             break
@@ -925,7 +928,6 @@ async def settle_workspace(
         winner_content = winner.content
         winner_history.append(winner_content)
 
-        # Convergence: same winner two rounds in a row
         if len(winner_history) >= 2 and winner_history[-1] == winner_history[-2]:
             final_winner = winner
             final_supporters = workspace_items[1:]
@@ -934,11 +936,9 @@ async def settle_workspace(
         final_winner = winner
         final_supporters = workspace_items[1:]
 
-        # Last round: don't need to seed
         if round_idx == max_rounds - 1:
             break
 
-        # Seed spreading activation from winner
         if graph_manager is not None:
             try:
                 graph_manager.seed_from_text(winner_content, weight=1.0)
@@ -963,9 +963,7 @@ async def settle_workspace(
             except Exception as e:
                 logger.debug("Spread activation failed: %s", e)
 
-        # Also retrieve memories similar to winner
         try:
-            from engine.memory import embed, retrieve_candidates_hybrid
             winner_emb = await embed(winner_content)
             spread_memories = await retrieve_candidates_hybrid(
                 query=winner_content,
@@ -982,11 +980,11 @@ async def settle_workspace(
         except Exception as e:
             logger.debug("Spread memory retrieval failed: %s", e)
 
-    if final_winner is None and winner_history:
-        # fallback: use last winner
-        pass
-
-    return [final_winner] + final_supporters if final_winner else [], {
-        "rounds": round_count,
-        "winner_history": winner_history,
-    }
+    return (
+        [final_winner] + final_supporters if final_winner else [],
+        {
+            **last_telemetry,
+            "rounds": round_count,
+            "winner_history": winner_history,
+        },
+    )

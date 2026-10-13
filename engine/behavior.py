@@ -9,8 +9,10 @@ from typing import Optional, List, Any
 from collections import namedtuple
 from pydantic import BaseModel
 
-from engine.attention import WorkspaceItem
+from models.workspace import WorkspaceItem
 from psyche.state import HariState
+
+from engine.attention import WorkspaceItem
 
 # Affordance result type: action name, free-text rationale, confidence strength
 ActionAffordance = namedtuple("ActionAffordance", ["action", "rationale", "strength"])

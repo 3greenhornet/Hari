@@ -1,7 +1,13 @@
-﻿# hari/psyche/grace.py
-"""
-Grace system: rolling window of user engagement estimates from monologue.
-Used to modulate negative deltas (encourage reciprocity).
+﻿"""
+psyche/grace.py
+CAUSAL STATUS: DISABLED for Sprint 1.
+This module modulates state deltas based on rolling user engagement. That
+is precisely the assistant-adjusts-to-user pattern the Sprint 1 experiment
+is trying to remove.
+The calls to add_engagement_score and modulate_delta are gated behind
+ENABLE_GRACE (default false) in engine/generate.py. Do not re-enable without
+sign-off.
+Kept for ablation only.
 """
 
 from collections import deque

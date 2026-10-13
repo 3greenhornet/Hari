@@ -16,6 +16,29 @@ ALPHA = float(os.getenv("ASYMPTOTIC_ALPHA", "0.25"))
 # Drive keys for snapshot
 DRIVE_KEYS = ["care", "curiosity", "maintenance", "completion", "coherence", "rest", "novelty"]
 
+_DEFAULT_SETPOINTS: Dict[str, float] = {
+    "coherence": 0.7,
+    "care": 0.5,
+    "curiosity": 0.5,
+    "completion": 0.4,
+    "maintenance": 0.4,
+    "rest": 0.5,
+    "novelty": 0.3,
+}
+
+_VIABILITY_WEIGHTS: Dict[str, float] = {
+    "coherence": 2.0,
+    "care": 1.0,
+    "curiosity": 1.0,
+    "completion": 0.7,
+    "maintenance": 1.5,
+    "rest": 0.5,
+    "novelty": 0.3,
+}
+
+_VIABILITY_TOLERANCE = 0.35
+FROZEN = {"engagement"}
+
 # Per‑field decay configuration
 _DECAY_CONFIG = {
     "care": {"baseline": 0.5, "decay": 0.01, "rise": 0.05},
@@ -24,7 +47,6 @@ _DECAY_CONFIG = {
     "completion": {"baseline": 0.3, "decay": 0.03, "rise": 0.07},
     "coherence": {"baseline": 0.7, "decay": 0.01, "rise": 0.04},
     "rest": {"baseline": 0.2, "decay": 0.08, "rise": 0.02},
-    "engagement": {"baseline": 0.5, "decay": 0.03, "rise": 0.03},
     "novelty": {"baseline": 0.1, "decay": 0.25, "rise": 0.15},
 }
 _VAD_DECAY = 0.02
@@ -77,6 +99,12 @@ class HariState:
             self._transitions = []
         if not hasattr(self, '_history_window'):
             self._history_window = deque(maxlen=5)
+        if not hasattr(self, '_setpoints'):
+            self._setpoints = dict(_DEFAULT_SETPOINTS)
+        if not hasattr(self, '_decay_rates'):
+            self._decay_rates = {key: value["decay"] for key, value in _DECAY_CONFIG.items()}
+        if not hasattr(self, '_vad_decay_value'):
+            self._vad_decay_value = _VAD_DECAY
 
     def asymptotic_update(self, current: float, delta: float, bounds: tuple = (0.0, 1.0)) -> float:
         """
@@ -102,7 +130,7 @@ class HariState:
 
     def update(self, deltas: Dict[str, float], source: Literal["MONOLOGUE", "PREDICTION_ERROR", "DRIFT", "GRACE", "BROADCAST", "REFLEXION"] = "DRIFT", reason: Optional[str] = None) -> None:
         for key, delta in deltas.items():
-            if not hasattr(self, key):
+            if not hasattr(self, key) or key in FROZEN:
                 continue
             old = getattr(self, key)
             bounds = (-1.0, 1.0) if key in ("valence", "arousal", "dominance") else (0.0, 1.0)
@@ -122,13 +150,13 @@ class HariState:
         self.record_snapshot()
 
     def natural_drift(self) -> None:
-        # Drives
+        # Drives — skip frozen keys.
         for key, config in _DECAY_CONFIG.items():
-            if not hasattr(self, key):
+            if not hasattr(self, key) or key in FROZEN:
                 continue
             old = getattr(self, key)
             baseline = config["baseline"]
-            decay_rate = config["decay"]
+            decay_rate = self._decay_rates.get(key, config["decay"])
             new = old * (1 - decay_rate) + baseline * decay_rate
             setattr(self, key, new)
             self._transitions.append(StateTransition(
@@ -142,10 +170,10 @@ class HariState:
             ))
             if len(self._transitions) > 1000:
                 self._transitions.pop(0)
-        # VAD fields drift toward 0
+        # VAD fields drift toward 0 using the instance-level rate.
         for key in ("valence", "arousal", "dominance"):
             old = getattr(self, key)
-            new = old * (1 - _VAD_DECAY)
+            new = old * (1 - self._vad_decay_value)
             setattr(self, key, new)
             self._transitions.append(StateTransition(
                 timestamp=time.time(),
@@ -188,6 +216,47 @@ class HariState:
 
     def get_transition_log(self, limit: int = 50) -> List[Dict[str, Any]]:
         return [t.__dict__ for t in self._transitions[-limit:]]
+
+    def compute_homeostatic_reward(self) -> float:
+        """Return the negative weighted squared distance from setpoints."""
+        distance = 0.0
+        for drive, setpoint in self._setpoints.items():
+            weight = _VIABILITY_WEIGHTS.get(drive, 1.0)
+            value = float(getattr(self, drive, 0.5))
+            distance += weight * (value - setpoint) ** 2
+        return -distance
+
+    def viability_zone_violated(self) -> List[str]:
+        """Return drives outside the configured viability tolerance."""
+        violated: List[str] = []
+        for drive, setpoint in self._setpoints.items():
+            value = float(getattr(self, drive, 0.5))
+            if abs(value - setpoint) > _VIABILITY_TOLERANCE:
+                violated.append(drive)
+        return violated
+
+    def get_setpoints_snapshot(self) -> Dict[str, float]:
+        """Return a copy of the current setpoints."""
+        return dict(self._setpoints)
+
+    def apply_reflection_edits(self, edits: Dict[str, float]) -> None:
+        """Apply bounded deltas to instance-owned editable parameters."""
+        from engine.reflection_edit import EDITABLE_PARAMETERS
+
+        for param_name, delta in edits.items():
+            if param_name not in EDITABLE_PARAMETERS:
+                continue
+            target, field_name, (lower, upper) = EDITABLE_PARAMETERS[param_name]
+            if field_name == "setpoint" and target in self._setpoints:
+                value = self._setpoints[target] + delta
+                self._setpoints[target] = max(lower, min(upper, value))
+            elif field_name == "decay":
+                if target == "vad":
+                    value = self._vad_decay_value + delta
+                    self._vad_decay_value = max(lower, min(upper, value))
+                elif target in self._decay_rates:
+                    value = self._decay_rates[target] + delta
+                    self._decay_rates[target] = max(lower, min(upper, value))
 
     def to_prompt_context(self) -> str:
         return (

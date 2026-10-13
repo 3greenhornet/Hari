@@ -1,6 +1,7 @@
 """
-psyche/fallback_emotions.py — Deterministic VAD formulas when LLM deltas are missing.
-Phase 6 stub. Phase 7+ may implement proper heuristics.
+psyche/fallback_emotions.py
+CAUSAL STATUS: DISABLED for Sprint 1.
+Currently a no-op. Do not implement for Sprint 1.
 """
 
 from psyche.state import HariState

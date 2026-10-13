@@ -106,7 +106,7 @@ class ConsolidationManager:
                 await asyncio.shield(
                     run_consolidation(self._session_id, final_turn)
                 )
-                graph_manager = await get_graph_manager()
+                graph_manager = await get_graph_manager(self._session_id)
                 await asyncio.shield(graph_manager.decay(decay_factor=0.99))
             except Exception as e:
                 logger.error(f"Final consolidation failed: {e}")
@@ -157,7 +157,7 @@ class ConsolidationManager:
             except Exception as e:
                 logger.error(f"Archival failed: {e}")
 
-            graph_manager = await get_graph_manager()
+            graph_manager = await get_graph_manager(self._session_id)
             await graph_manager.decay(decay_factor=0.99)
 
         except Exception as e:

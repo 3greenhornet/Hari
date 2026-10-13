@@ -55,10 +55,16 @@ async def init_db():
                         content TEXT NOT NULL,
                         event_type TEXT,
                         thematic_tags TEXT[],
-                        significance FLOAT,
+                        significance FLOAT DEFAULT 0.5,
                         meaning_summary TEXT,
-                        embedding vector(3072),
-                        created_at TIMESTAMP DEFAULT NOW()
+                        embedding vector(768),
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        usage_count INTEGER DEFAULT 0,
+                        last_retrieved_turn INTEGER DEFAULT 0,
+                        explanatory_power FLOAT DEFAULT 0.5,
+                        valence FLOAT DEFAULT 0.0,
+                        arousal FLOAT DEFAULT 0.0,
+                        promoted_to_hypothesis BOOLEAN DEFAULT FALSE
                     );
                 """)
                 print("✅ Table 'memories' stabilized.")

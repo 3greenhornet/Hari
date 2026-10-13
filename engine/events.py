@@ -48,6 +48,20 @@ class EventType(Enum):
     SESSION_START = "session_start"
     SESSION_END = "session_end"
 
+    # Sprint 1 events
+    INCOMING_EVENT = "incoming_event"
+    SILENCE_EMITTED = "silence_emitted"
+    CONTAMINATION_DETECTED = "contamination_detected"
+    EXPRESSION_ARTIFACT = "expression_artifact"
+    HOMEOSTATIC_REWARD = "homeostatic_reward"
+    REFLECTION_EDIT = "reflection_edit"
+    PURSUIT_SPAWNED = "pursuit_spawned"
+    PURSUIT_REINFORCED = "pursuit_reinforced"
+    PURSUIT_DECEASED = "pursuit_deceased"
+    SELF_NARRATIVE_UPDATED = "self_narrative_updated"
+    THOUGHT_PROMOTED = "thought_promoted"
+    SUBSTRATE_FAULT = "substrate_fault"
+
 
 @dataclass
 class CognitiveEvent:
@@ -142,7 +156,8 @@ class EventLogger:
         )
         self._write_event(event)
     
-    def log_assistant_response(self, content: str, workspace_composition: Optional[List[Dict]] = None) -> None:
+    def log_assistant_response(self, content: Optional[str], workspace_composition: Optional[List[Dict]] = None) -> None:
+        content = content or ""
         payload = {
             "content": content,
             "length": len(content),
@@ -226,5 +241,111 @@ class EventLogger:
         event = self._create_event(
             EventType.DECISION_TRACE,
             payload={"trace_id": trace_id}
+        )
+        self._write_event(event)
+
+    def log_incoming_event(self, content: str) -> None:
+        event = self._create_event(
+            EventType.INCOMING_EVENT,
+            payload={"content": content, "length": len(content)},
+        )
+        self._write_event(event)
+
+    def log_silence(self, reason: str) -> None:
+        event = self._create_event(
+            EventType.SILENCE_EMITTED,
+            payload={"reason": reason},
+        )
+        self._write_event(event)
+
+    def log_contamination(self, stage: str, content: str, matches: list) -> None:
+        event = self._create_event(
+            EventType.CONTAMINATION_DETECTED,
+            payload={"stage": stage, "content": content[:300], "matches": matches},
+        )
+        self._write_event(event)
+
+    def log_expression_artifact(self, content: str) -> None:
+        event = self._create_event(
+            EventType.EXPRESSION_ARTIFACT,
+            payload={"content": content[:300]},
+        )
+        self._write_event(event)
+
+    def log_homeostatic_reward(
+        self,
+        reward_before: float,
+        reward_after: float,
+        delta: float,
+        viability_violated: list,
+    ) -> None:
+        event = self._create_event(
+            EventType.HOMEOSTATIC_REWARD,
+            payload={
+                "reward_before": reward_before,
+                "reward_after": reward_after,
+                "delta": delta,
+                "viability_violated": viability_violated,
+            },
+        )
+        self._write_event(event)
+
+    def log_reflection_edit(self, edits: dict, turn: int) -> None:
+        event = self._create_event(
+            EventType.REFLECTION_EDIT,
+            payload={"edits": edits, "turn": turn},
+        )
+        self._write_event(event)
+
+    def log_pursuit_spawned(self, pursuit_id: str, content: str, strength: float) -> None:
+        event = self._create_event(
+            EventType.PURSUIT_SPAWNED,
+            payload={
+                "pursuit_id": pursuit_id,
+                "content_preview": content[:200],
+                "initial_strength": strength,
+            },
+        )
+        self._write_event(event)
+
+    def log_pursuit_reinforced(
+        self,
+        pursuit_id: str,
+        content: str,
+        new_strength: float,
+        delta: float,
+    ) -> None:
+        event = self._create_event(
+            EventType.PURSUIT_REINFORCED,
+            payload={
+                "pursuit_id": pursuit_id,
+                "content_preview": content[:200],
+                "new_strength": new_strength,
+                "delta": delta,
+            },
+        )
+        self._write_event(event)
+
+    def log_pursuit_deceased(self, pursuit_id: str, content: str) -> None:
+        event = self._create_event(
+            EventType.PURSUIT_DECEASED,
+            payload={
+                "pursuit_id": pursuit_id,
+                "content_preview": content[:200],
+            },
+        )
+        self._write_event(event)
+
+    def log_self_narrative_update(self, new_narrative: str, trigger: str) -> None:
+        event = self._create_event(
+            EventType.SELF_NARRATIVE_UPDATED,
+            payload={"new_narrative": new_narrative[:1000], "trigger": trigger},
+        )
+        self._write_event(event)
+
+    def log_substrate_fault(self, reason: str) -> None:
+        event = self._create_event(
+            EventType.SUBSTRATE_FAULT,
+            payload={"reason": reason},
         )
         self._write_event(event)

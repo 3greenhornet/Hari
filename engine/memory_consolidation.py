@@ -136,12 +136,12 @@ Memory content: "{memory.content[:500]}"
 Role: {memory.role}
 
 Determine which type of hypothesis this relates to:
-- "user": Something about the user\'s values, beliefs, or patterns
+- "other": Something about the participant's values, beliefs, or patterns
 - "self": Something about Hari\'s own tendencies or identity  
 - "world": Something about external reality
 
 Return ONLY a valid JSON object with exactly these fields:
-- "type": one of "user", "self", "world"
+- "type": one of "other", "self", "world"
 - "statement": a concise declarative sentence (max 200 chars)
 - "confidence": a float between 0.0 and 1.0
 
@@ -306,10 +306,10 @@ async def archive_old_memories(session_id: str, older_than_days: int = ARCHIVE_O
     if not pool:
         return 0
 
-    cutoff_date = datetime.now(timezone.utc) - timedelta(days=older_than_days)
-    # Ensure cutoff_date is timezone-aware
-    if cutoff_date.tzinfo is None:
-        cutoff_date = cutoff_date.replace(tzinfo=timezone.utc)
+    # Use naive UTC datetime — the memories.created_at column is
+    # TIMESTAMP WITHOUT TIME ZONE, so passing an aware datetime causes
+    # "can't subtract offset-naive and offset-aware datetimes".
+    cutoff_date = datetime.utcnow() - timedelta(days=older_than_days)
 
     async with pool.acquire() as conn:
         old_memories = await conn.fetch("""

@@ -16,12 +16,11 @@ CREATE TABLE memories (
     thematic_tags TEXT[],
     significance FLOAT,
     meaning_summary TEXT,
-    embedding vector(3072),
+    embedding vector(768),
     created_at TIMESTAMP DEFAULT NOW()
 );
 
-ALTER TABLE memories OWNER TO hari_user;
-GRANT ALL PRIVILEGES ON TABLE memories TO hari_user;
+-- The container uses the postgres role; no external owner grant is required.
 CREATE INDEX memories_session_idx ON memories(session_id);
 CREATE INDEX memories_embedding_idx ON memories USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 

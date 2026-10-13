@@ -1,48 +1,62 @@
-# Design docs (we already have the blueprint in chat)
-_framework_extracted.txt
-packages.txt
-AGENTS.md
-CLAUDE.md
-
-TODO.md
-_framework_extracted.txt
-
-# Entry points (not changing these yet)
-run.py
-app.py
-
-# Environment and config
-.env
-.env.example
-
+# Repomix / ignore files themselves
+.repomixignore
 .gitignore
 bundle.py
 
-# Generated output
-*.xml
-*.log
-
-# Non-code directories
-tests/
-__pycache__/
-.venv/
-venv/
-.git/
-
-hari_july.md
-
-
-
+# Design docs / notes / previous Repomix outputs
 *.md
 *.txt
 *.ps1
-*.log
-*.xml
-.env
-.gitignore
-bundle.py
-TODO.md
-AGENTS.md
-CLAUDE.md
+hari_code_only1stoct.md
+hari_code_only1stoctober2nd.md
+hari_code_only1stoctober2nd.md
+hari_code_onlyoct4.md
 _framework_extracted.txt
 packages.txt
+AGENTS.md
+CLAUDE.md
+TODO.md
+hari_july.md
+
+# Entry points not being changed yet
+run.py
+app.py
+
+# Environment / secrets
+.env
+.env.example
+
+# Generated output / logs
+*.log
+*.xml
+*.jsonl
+backup_*.sql
+baseline/**/*.sql
+baseline/**/*.jsonl
+logs/
+profiles/
+outputs/
+reports/
+logs/events/
+logs/attention/
+
+# Python / tooling caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.git/
+
+# Non-code / test dirs
+tests/
